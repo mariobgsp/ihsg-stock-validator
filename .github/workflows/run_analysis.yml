@@ -18,7 +18,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    # FIX: Use Python 3.10 (Most stable for pandas_ta)
+    # Python 3.10 is rock solid for pandas/numpy
     - name: Set up Python 3.10
       uses: actions/setup-python@v3
       with:
@@ -29,8 +29,8 @@ jobs:
         python -m pip install --upgrade pip setuptools wheel
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-    - name: Analyze BBCA (Standard)
-      run: python main.py BBCA
+    # - name: Analyze BBCA (Standard)
+    #   run: python main.py BBCA
 
-    - name: Analyze GOTO (Custom Flag Test)
-      run: python main.py GOTO --period 6mo --sl 1.5 --tp 2.0 --hold 5
+    - name: Analyze ELSA (Custom Flag Test)
+      run: python main.py ELSA --period 2y --sl 3.0 --tp 6.0 --fib 60 --hold 20
