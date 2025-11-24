@@ -86,3 +86,7 @@ python main.py BREN --cmf 10 --mfi 10
 For educational purposes only.\
 No guarantee of future profits.\
 Do your own research.
+
+### Additional Notice
+
+This program was **created using Gemini 3.0**.
