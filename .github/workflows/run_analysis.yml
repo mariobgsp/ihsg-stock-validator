@@ -1,0 +1,40 @@
+name: Auto-Run Stock Analysis
+
+# Trigger on push to main or manual dispatch
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - '**.py'             # Run if python files change
+      - 'requirements.txt'   # Run if dependencies change
+      - '.github/workflows/**' # Run if this file changes
+  workflow_dispatch:
+
+jobs:
+  build-and-analyze:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Check out code
+    - uses: actions/checkout@v3
+
+    # 2. Set up Python
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v3
+      with:
+        python-version: "3.9"
+
+    # 3. Install Dependencies
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    # 4. TEST 1: Standard Analysis (Default Config)
+    - name: Analyze BBCA (Standard)
+      run: python main.py BBCA
+
+    # 5. TEST 2: Custom Analysis (Testing New Flags)
+    # This verifies that your new argparse logic works correctly
+    - name: Analyze ELSA (Swing Mode Test)
+      run: python main.py ELSA --period 2y --sl 1 --tp 3.0 --hold 20

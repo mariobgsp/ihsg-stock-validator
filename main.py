@@ -1,14 +1,16 @@
 import os
 import sys
-from engine import StockAnalyzer
+import argparse
+from engine import StockAnalyzer, DEFAULT_CONFIG
 
 def clear_screen():
-    os.system('cls' if os.name == 'nt' else 'clear')
+    if sys.stdout.isatty():
+        os.system('cls' if os.name == 'nt' else 'clear')
 
 def print_header():
     print("="*60)
-    print("      SIMPLE IHSG STOCK VALIDATOR (CLI)      ")
-    print("      Features: Sentiment + Grid Search + Chart Patterns")
+    print("      SIMPLE IHSG STOCK VALIDATOR (Advanced)      ")
+    print("      Features: Modular Config + Smart Money + Patterns")
     print("="*60)
 
 def print_report(data):
@@ -32,14 +34,12 @@ def print_report(data):
     # 3. CHART PATTERNS
     print(f"\n--- CHART PATTERNS (Pattern Recognition) ---")
     
-    # VCP
     vcp = data['context'].get('vcp', {})
     if vcp.get('detected'):
         print(f"[+] VCP DETECTED: {vcp['msg']}")
     else:
         print(f"[-] VCP: No clear contraction detected.")
         
-    # Geometry (Triangles/Pennants)
     geo = data['context'].get('geo', {})
     if geo.get('pattern') != "None":
         print(f"[+] GEOMETRY: {geo['pattern']}")
@@ -65,7 +65,7 @@ def print_report(data):
         print(f"TAKE PROFIT:  Rp {plan['take_profit']:,.0f} (+{tp_pct:.1f}%)")
         print(f"Risk/Reward:  {plan['risk_reward']}")
 
-    # 5. NEWS SENTIMENT (RESTORED)
+    # 5. NEWS SENTIMENT
     print(f"\n--- NEWS SENTIMENT ---")
     s_data = data['sentiment']
     print(f"Rating: {s_data['sentiment']} (Score: {s_data['score']})")
@@ -74,23 +74,33 @@ def print_report(data):
     for hl in s_data['headlines']:
         print(f"  - {hl}")
 
-    # 6. CONTEXT (OBV & Dist Support)
+    # 6. CONTEXT (Smart Money Included)
     ctx = data['context']
-    print(f"\n--- CONTEXT & INDICATORS ---")
+    print(f"\n--- CONTEXT & SMART MONEY ---")
     print(f"Trend:           {ctx['trend']}")
     print(f"OBV Status:      {ctx['obv_status']}")
+    print(f"Money Flow:      {ctx['smart_money']}") 
     print(f"Volatility(ATR): Rp {ctx['atr']:,.0f} (Daily Range)")
     print(f"Support (20d):   Rp {ctx['support']:,.0f} (Dist: {ctx['dist_support']:.1f}%)")
     print(f"Resistance (20d):Rp {ctx['resistance']:,.0f}")
 
-    # 7. FIBONACCI
-    print(f"\n--- FIBONACCI KEY LEVELS (Last 120 Days) ---")
+    # 7. FIBONACCI (Dynamic Labels)
+    print(f"\n--- FIBONACCI KEY LEVELS ---")
     fibs = ctx.get('fib_levels', {})
+    curr_p = data['price']
+    
     if fibs:
-        print(f"High (0.0):      Rp {fibs.get('0.0 (High)', 0):,.0f}")
-        print(f"0.5 Halfway:     Rp {fibs.get('0.5 (Half)', 0):,.0f}")
-        print(f"0.618 GOLDEN:    Rp {fibs.get('0.618 (Golden)', 0):,.0f}  <-- Strong Support")
-        print(f"Low (1.0):       Rp {fibs.get('1.0 (Low)', 0):,.0f}")
+        # Helper to determine label
+        def get_fib_label(price):
+            if curr_p > price: return "[SUPPORT]"
+            elif curr_p < price: return "[RESISTANCE]"
+            else: return "[AT LEVEL]"
+
+        print(f"High (0.0):      Rp {fibs.get('0.0 (High)', 0):,.0f} {get_fib_label(fibs.get('0.0 (High)', 0))}")
+        print(f"0.382 Level:     Rp {fibs.get('0.382', 0):,.0f} {get_fib_label(fibs.get('0.382', 0))}")
+        print(f"0.5 Halfway:     Rp {fibs.get('0.5 (Half)', 0):,.0f} {get_fib_label(fibs.get('0.5 (Half)', 0))}")
+        print(f"0.618 GOLDEN:    Rp {fibs.get('0.618 (Golden)', 0):,.0f} {get_fib_label(fibs.get('0.618 (Golden)', 0))}")
+        print(f"Low (1.0):       Rp {fibs.get('1.0 (Low)', 0):,.0f} {get_fib_label(fibs.get('1.0 (Low)', 0))}")
 
     # 8. Active Strategies
     print(f"\n--- ✅ STRATEGIES ACTIVE TODAY ---")
@@ -107,27 +117,52 @@ def print_report(data):
     print("\n" + "="*60)
 
 def main():
-    while True:
+    # Setup CLI Argument Parser
+    parser = argparse.ArgumentParser(description="IHSG Stock Validator with Custom Config")
+    
+    parser.add_argument('ticker', nargs='?', help='Stock Ticker (e.g. BBCA)')
+    parser.add_argument('--period', type=str, default=DEFAULT_CONFIG['BACKTEST_PERIOD'], help='Backtest Period (e.g. 1y, 2y)')
+    parser.add_argument('--hold', type=int, default=DEFAULT_CONFIG['MAX_HOLD_DAYS'], help='Max Hold Days for Grid Search')
+    parser.add_argument('--rsi', type=int, default=DEFAULT_CONFIG['RSI_PERIOD'], help='RSI Period')
+    parser.add_argument('--sl', type=float, default=DEFAULT_CONFIG['SL_MULTIPLIER'], help='Stop Loss ATR Multiplier')
+    parser.add_argument('--tp', type=float, default=DEFAULT_CONFIG['TP_MULTIPLIER'], help='Take Profit ATR Multiplier')
+    parser.add_argument('--fib', type=int, default=DEFAULT_CONFIG['FIB_LOOKBACK_DAYS'], help='Fibonacci Lookback Days')
+    
+    # NEW: Smart Money Config Flags
+    parser.add_argument('--cmf', type=int, default=DEFAULT_CONFIG['CMF_PERIOD'], help='Chaikin Money Flow Period')
+    parser.add_argument('--mfi', type=int, default=DEFAULT_CONFIG['MFI_PERIOD'], help='Money Flow Index Period')
+
+    args = parser.parse_args()
+
+    if not args.ticker:
         clear_screen()
         print_header()
-        
-        ticker = input("\nEnter Ticker (e.g. BBCA, ANTM) or 'Q' to quit: ").strip()
-        
-        if ticker.lower() == 'q':
-            print("Goodbye! Cuan always.")
-            sys.exit()
-            
-        if not ticker:
-            continue
-            
-        print(f"\nAnalyzing {ticker.upper()}... (Fetching Data & Crunching Numbers)")
-        
-        analyzer = StockAnalyzer(ticker)
-        report_data = analyzer.generate_final_report()
-        
-        print_report(report_data)
-        
-        input("\nPress Enter to search another stock...")
+        ticker_input = input("\nEnter Ticker (e.g. BBCA, ANTM): ").strip()
+        if not ticker_input:
+            print("No ticker provided. Exiting.")
+            return
+        args.ticker = ticker_input
+    else:
+        clear_screen()
+        print_header()
+
+    user_config = {
+        "BACKTEST_PERIOD": args.period,
+        "MAX_HOLD_DAYS": args.hold,
+        "RSI_PERIOD": args.rsi,
+        "SL_MULTIPLIER": args.sl,
+        "TP_MULTIPLIER": args.tp,
+        "FIB_LOOKBACK_DAYS": args.fib,
+        "CMF_PERIOD": args.cmf,
+        "MFI_PERIOD": args.mfi
+    }
+
+    print(f"\nAnalyzing {args.ticker.upper()}... (Config: {user_config})")
+    
+    analyzer = StockAnalyzer(args.ticker, user_config)
+    report_data = analyzer.generate_final_report()
+    
+    print_report(report_data)
 
 if __name__ == "__main__":
     main()
