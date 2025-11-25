@@ -82,7 +82,7 @@ def print_report(data):
     print(f"Supp (S1):   Rp {pivots.get('S1', 0):,.0f}")
     print(f"Resis (R1):  Rp {pivots.get('R1', 0):,.0f}")
 
-    # 6. FIBONACCI LEVELS (RESTORED)
+    # 6. FIBONACCI LEVELS
     print(f"\n--- FIBONACCI KEY LEVELS ---")
     fibs = ctx.get('fib_levels', {})
     curr_p = data['price']
