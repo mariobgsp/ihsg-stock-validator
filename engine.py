@@ -23,7 +23,6 @@ DEFAULT_CONFIG = {
     "CMF_PERIOD": 20,
     "MFI_PERIOD": 14,
     "VOL_MA_PERIOD": 20,
-    # Fundamental Thresholds
     "MIN_MARKET_CAP": 500_000_000_000, 
     "MIN_DAILY_VOL": 1_000_000_000
 }
@@ -182,7 +181,6 @@ class StockAnalyzer:
     def prepare_indicators(self):
         if self.df is None or self.df.empty: return
 
-        # Adaptive Trend
         if self.data_len >= 200:
             self.df['EMA_200'] = self.calc_ema(self.df['Close'], 200)
             self.active_trend_col = 'EMA_200'
@@ -193,7 +191,6 @@ class StockAnalyzer:
             self.df['EMA_20'] = self.calc_ema(self.df['Close'], 20)
             self.active_trend_col = 'EMA_20'
 
-        # Oscillators
         rsi_p = self.config["RSI_PERIOD"]
         if self.data_len > rsi_p:
             self.df['RSI'] = self.calc_rsi(self.df['Close'], rsi_p)
@@ -201,13 +198,11 @@ class StockAnalyzer:
             self.df[f"STOCHk"] = k
             self.df[f"STOCHd"] = d
 
-        # MA Cross
         for fast, slow in MA_TEST_PAIRS:
             if self.data_len > slow:
                 self.df[f'EMA_{fast}'] = self.calc_ema(self.df['Close'], fast)
                 self.df[f'EMA_{slow}'] = self.calc_ema(self.df['Close'], slow)
 
-        # Volume & Smart Money
         cmf_p = self.config["CMF_PERIOD"]
         mfi_p = self.config["MFI_PERIOD"]
         vol_p = self.config["VOL_MA_PERIOD"]
@@ -217,7 +212,6 @@ class StockAnalyzer:
         self.df['VOL_MA'] = self.df['Volume'].rolling(window=vol_p).mean()
         self.df['RVOL'] = self.df['Volume'] / self.df['VOL_MA']
 
-        # ATR
         atr_p = self.config["ATR_PERIOD"]
         self.df['ATR'] = self.calc_atr(self.df['High'], self.df['Low'], self.df['Close'], atr_p)
 
@@ -451,62 +445,73 @@ class StockAnalyzer:
             "pivots": self.calculate_pivot_points()
         }
 
+    def adjust_to_tick_size(self, price):
+        """Adjusts price to the nearest valid IDX tick size."""
+        if price < 200:
+            tick = 1
+        elif price < 500:
+            tick = 2
+        elif price < 2000:
+            tick = 5
+        elif price < 5000:
+            tick = 10
+        else:
+            tick = 25
+        
+        return round(price / tick) * tick
+
     def calculate_trade_plan(self, plan_type, action, current_price, atr, support, resistance, best_strategy, fib_levels, pivots):
         plan = {"type": plan_type, "entry": 0, "stop_loss": 0, "take_profit": 0, "risk_reward": "N/A", "status": "ACTIVE"}
-        
-        # 1. DUAL ENGINE: Define Risk Profile
-        if plan_type == "SHORT_TERM":
-            sl_mult = 1.5
-            tp_mult = 2.0
-        else: # SWING
-            sl_mult = self.config["SL_MULTIPLIER"]
-            tp_mult = 4.0
+        sl_mult = 1.5 if plan_type == "SHORT_TERM" else self.config["SL_MULTIPLIER"]
+        tp_mult = 2.0 if plan_type == "SHORT_TERM" else 4.0
 
-        # 2. SMART SELECTION LOGIC (Wait Strategy)
-        if "WAIT" in action:
-            plan['status'] = "PENDING (Limit)"
+        if "BUY" in action:
+            plan['entry'] = self.adjust_to_tick_size(current_price)
+            plan['status'] = "EXECUTE NOW (Market)"
+            plan['stop_loss'] = self.adjust_to_tick_size(current_price - (atr * sl_mult))
+            plan['take_profit'] = self.adjust_to_tick_size(current_price + (atr * tp_mult))
+            plan['risk_reward'] = f"1:{tp_mult/sl_mult:.1f}"
             
-            # Short Term --> Favors PIVOTS (Daily Levels)
-            if plan_type == "SHORT_TERM":
-                s1 = pivots.get("S1", 0)
-                p = pivots.get("P", 0)
-                target_pivot = p if p < current_price else s1
-                
-                if target_pivot > (current_price * 0.92): # Close enough
-                    plan['entry'] = target_pivot
-                    plan['note'] = "Wait for Pivot S1/P"
-                else:
-                    plan['entry'] = support # Fallback
-                    plan['note'] = "Wait for Support"
-                    
-            # Swing Term --> Favors FIBONACCI (Structural Levels)
-            else:
+        elif "WAIT" in action:
+            plan['status'] = "PENDING (Limit)"
+            strategy_type = best_strategy.get('strategy', 'None')
+            
+            target_price = support # Default
+            
+            if "RSI" in strategy_type or "Stoch" in strategy_type:
                 target_fib = 0
                 for _, price in sorted(fib_levels.items(), key=lambda x: x[1], reverse=True):
                     if price < current_price:
                         target_fib = price
                         break
                 
-                if target_fib > (current_price * 0.85):
-                    plan['entry'] = target_fib
-                    plan['note'] = "Wait for Fib Support"
-                else:
-                    plan['entry'] = support
-                    plan['note'] = "Wait for Major Support"
+                # SMART SELECTION: Use Pivot for Short Term, Fib for Swing
+                s1 = pivots.get("S1", 0)
+                
+                if plan_type == "SHORT_TERM":
+                    if s1 > (current_price * 0.85): 
+                        target_price = s1
+                        plan['note'] = "Wait for Pivot S1"
+                    else:
+                        target_price = support
+                        plan['note'] = "Wait for Support"
+                else: # SWING
+                    if target_fib > (current_price * 0.85):
+                        target_price = target_fib
+                        plan['note'] = "Wait for Fib Support"
+                    else:
+                        target_price = support
+                        plan['note'] = "Wait for Major Support"
+            
+            elif "MA" in strategy_type:
+                target_price = resistance
+                plan['note'] = "Buy Breakout"
 
-            # Calculate Projection
+            plan['entry'] = self.adjust_to_tick_size(target_price)
             if plan['entry'] > 0:
-                plan['stop_loss'] = plan['entry'] - (atr * sl_mult)
-                plan['take_profit'] = plan['entry'] + (atr * tp_mult)
+                plan['stop_loss'] = self.adjust_to_tick_size(plan['entry'] - (atr * sl_mult))
+                plan['take_profit'] = self.adjust_to_tick_size(plan['entry'] + (atr * tp_mult))
                 plan['risk_reward'] = "Projection"
-
-        # 3. ACTIVE BUY LOGIC
-        elif "BUY" in action:
-            plan['entry'] = current_price
-            plan['status'] = "EXECUTE NOW (Market)"
-            plan['stop_loss'] = current_price - (atr * sl_mult)
-            plan['take_profit'] = current_price + (atr * tp_mult)
-            plan['risk_reward'] = f"1:{tp_mult/sl_mult:.1f}"
             
         return plan
 
