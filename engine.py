@@ -53,12 +53,10 @@ class StockAnalyzer:
     def fetch_data(self):
         try:
             period = self.config["BACKTEST_PERIOD"]
-            # Auto adjust OHLC data
             self.df = yf.download(self.ticker, period=period, progress=False, auto_adjust=True)
             
             if self.df.empty: return False
             
-            # Handle MultiIndex columns from yfinance
             if isinstance(self.df.columns, pd.MultiIndex):
                 self.df.columns = self.df.columns.get_level_values(0)
             
@@ -122,7 +120,7 @@ class StockAnalyzer:
         except Exception as e:
             self.news_analysis = {"sentiment": "Error", "score": 0, "headlines": [str(e)]}
 
-    # --- MANUAL INDICATOR CALCULATIONS (No pandas_ta dependency) ---
+    # --- MANUAL INDICATOR CALCULATIONS ---
     
     def calc_rsi(self, series, period):
         delta = series.diff()
@@ -142,12 +140,11 @@ class StockAnalyzer:
         return k, d
 
     def calc_atr(self, high, low, close, period):
-        # TR = Max(H-L, |H-Cp|, |L-Cp|)
         tr1 = high - low
         tr2 = (high - close.shift(1)).abs()
         tr3 = (low - close.shift(1)).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return tr.rolling(window=period).mean() # Simple ATR
+        return tr.rolling(window=period).mean()
 
     def calc_obv(self, close, volume):
         obv = (np.sign(close.diff()) * volume).fillna(0).cumsum()
@@ -156,10 +153,8 @@ class StockAnalyzer:
     def calc_mfi(self, high, low, close, volume, period):
         typical_price = (high + low + close) / 3
         raw_money_flow = typical_price * volume
-        
         positive_flow = raw_money_flow.where(typical_price > typical_price.shift(1), 0)
         negative_flow = raw_money_flow.where(typical_price < typical_price.shift(1), 0)
-        
         mf_ratio = positive_flow.rolling(window=period).sum() / negative_flow.rolling(window=period).sum()
         return 100 - (100 / (1 + mf_ratio))
 
@@ -186,8 +181,6 @@ class StockAnalyzer:
         rsi_p = self.config["RSI_PERIOD"]
         if self.data_len > rsi_p:
             self.df['RSI'] = self.calc_rsi(self.df['Close'], rsi_p)
-            
-            # Stochastic
             k, d = self.calc_stoch(self.df['High'], self.df['Low'], self.df['Close'], STOCH_K_PERIOD, STOCH_D_PERIOD)
             self.df[f"STOCHk"] = k
             self.df[f"STOCHd"] = d
@@ -326,6 +319,67 @@ class StockAnalyzer:
         except Exception: pass
         return result
 
+    def detect_candle_patterns(self):
+        """
+        Detects Last Candle Patterns: 
+        Hammer, Hanging Man, Morning Star, Three White Soldiers (Musketeers)
+        """
+        res = {"pattern": "None", "sentiment": "Neutral"}
+        try:
+            if self.data_len < 4: return res
+            
+            # Get last few rows
+            df = self.df.iloc[-4:].copy()
+            
+            # Calc Candle Basics
+            df['Body'] = abs(df['Close'] - df['Open'])
+            df['UpperShadow'] = df['High'] - df[['Open', 'Close']].max(axis=1)
+            df['LowerShadow'] = df[['Open', 'Close']].min(axis=1) - df['Low']
+            df['IsGreen'] = df['Close'] > df['Open']
+            
+            # Latest Candle
+            c0 = df.iloc[-1] # Today
+            c1 = df.iloc[-2] # Yesterday
+            c2 = df.iloc[-3] # 2 days ago
+            
+            # 1. HAMMER (Bullish Reversal)
+            # Long lower shadow (> 2x body), small upper shadow, downtrend context
+            is_hammer = (c0['LowerShadow'] > 2 * c0['Body']) and \
+                        (c0['UpperShadow'] < 0.5 * c0['Body'])
+            
+            # 2. HANGING MAN (Bearish Reversal)
+            # Same shape as hammer, but appears at top of trend
+            # Simplified check: Look at recent movement
+            recent_move = self.df['Close'].iloc[-1] - self.df['Close'].iloc[-5]
+            
+            if is_hammer:
+                if recent_move < 0:
+                    res = {"pattern": "Hammer", "sentiment": "Bullish Reversal"}
+                else:
+                    res = {"pattern": "Hanging Man", "sentiment": "Bearish Reversal"}
+            
+            # 3. THREE WHITE SOLDIERS (Three Musketeers)
+            # 3 consecutive greens, closing higher
+            if c0['IsGreen'] and c1['IsGreen'] and c2['IsGreen']:
+                if c0['Close'] > c1['Close'] > c2['Close']:
+                    # Check if bodies are decent size (not dojis)
+                    avg_body = df['Body'].mean()
+                    if c0['Body'] > 0.5 * avg_body:
+                        res = {"pattern": "Three White Soldiers", "sentiment": "Strong Bullish Momentum"}
+
+            # 4. MORNING STAR (Bullish Reversal)
+            # Down candle, small gap/doji, Up candle
+            is_c2_red = not c2['IsGreen']
+            is_c1_small = c1['Body'] < (0.5 * c2['Body']) # Star
+            is_c0_green = c0['IsGreen']
+            is_c0_piercing = c0['Close'] > (c2['Open'] + c2['Close']) / 2 # Closed > 50% of C2 body
+            
+            if is_c2_red and is_c1_small and is_c0_green and is_c0_piercing:
+                 res = {"pattern": "Morning Star", "sentiment": "Major Bullish Reversal"}
+
+        except Exception: pass
+        return res
+
     def get_market_context(self):
         last_price = self.df['Close'].iloc[-1]
         lookback = min(20, self.data_len)
@@ -370,11 +424,16 @@ class StockAnalyzer:
             else: money_flow = "RETAIL NOISE / Indecision"
             if vol > (2.0 * vol_ma): money_flow += " [HIGH VOLUME]"
 
+        # Patterns
+        candle_pat = self.detect_candle_patterns()
+
         return {
             "price": last_price, "support": support, "resistance": resistance,
             "dist_support": dist_supp, "fib_levels": fibs, "trend": trend,
             "atr": atr, "obv_status": obv_status, "smart_money": money_flow,
-            "vcp": self.detect_vcp_pattern(), "geo": self.detect_geometric_patterns()
+            "vcp": self.detect_vcp_pattern(), 
+            "geo": self.detect_geometric_patterns(),
+            "candle": candle_pat # New Key
         }
 
     def calculate_trade_plan(self, action, current_price, atr, support, resistance, best_strategy, fib_levels):
@@ -402,7 +461,6 @@ class StockAnalyzer:
                     if price < current_price:
                         potential_supports.append((label, price))
                 potential_supports.sort(key=lambda x: x[1], reverse=True)
-                
                 if potential_supports:
                     target_label, target_fib = potential_supports[0]
                     
@@ -412,7 +470,6 @@ class StockAnalyzer:
                 else:
                     plan['entry'] = support
                     plan['note'] = f"Strategy uses {best_strategy['details']}. Wait for Support."
-                    
             elif "MA" in strategy_type:
                 plan['entry'] = resistance
                 plan['note'] = f"Momentum Strategy. Buy Breakout > {resistance:,.0f}."
@@ -457,6 +514,15 @@ class StockAnalyzer:
              action = "CAUTION / WAIT"
              trigger_msg += " [Blocked by News]"
 
+        # Candlestick Override (Strong Reversal)
+        # If Action is WAIT but we see a HAMMER or Morning Star at support, consider BUY
+        if action == "WAIT" and ctx['candle']['pattern'] in ["Hammer", "Morning Star", "Three White Soldiers"]:
+             if ctx['dist_support'] < 5.0: # Valid only near support
+                 action = "ACTION: BUY (Reversal Pattern)"
+                 trigger_msg = f"Pattern: {ctx['candle']['pattern']} near Support"
+             else:
+                 trigger_msg += f" [Watch: {ctx['candle']['pattern']} formed]"
+
         if (ctx['vcp']['detected'] or ctx['geo']['pattern'] != "None") and action == "WAIT":
              trigger_msg += f" [PATTERN WATCH: {ctx['geo']['pattern'] if ctx['geo']['pattern'] != 'None' else 'VCP'}]"
 
@@ -471,3 +537,5 @@ class StockAnalyzer:
             "all_strategies": top_strategies, "context": ctx,
             "trade_plan": trade_plan, "is_ipo": self.data_len < 200, "days_listed": self.data_len
         }
+
+
