@@ -10,7 +10,7 @@ def clear_screen():
 def print_header():
     print("="*60)
     print("      SIMPLE IHSG STOCK VALIDATOR (Advanced)      ")
-    print("      Features: Modular Config + Smart Money + Patterns")
+    print("      Features: Config + Smart Money + Pattern + Candles")
     print("="*60)
 
 def print_report(data):
@@ -32,20 +32,26 @@ def print_report(data):
     print(f"Logic: {data['trigger']}")
 
     # 3. CHART PATTERNS
-    print(f"\n--- CHART PATTERNS (Pattern Recognition) ---")
+    print(f"\n--- CHART & CANDLE PATTERNS ---")
     
+    # Candles (New)
+    candle = data['context'].get('candle', {})
+    if candle.get('pattern') != "None":
+        print(f"[+] CANDLESTICK: {candle['pattern']}")
+        print(f"    Signal: {candle['sentiment']}")
+    else:
+        print(f"[-] Candle: No major reversal pattern detected.")
+
+    # VCP
     vcp = data['context'].get('vcp', {})
     if vcp.get('detected'):
         print(f"[+] VCP DETECTED: {vcp['msg']}")
-    else:
-        print(f"[-] VCP: No clear contraction detected.")
         
+    # Geometry
     geo = data['context'].get('geo', {})
     if geo.get('pattern') != "None":
         print(f"[+] GEOMETRY: {geo['pattern']}")
         print(f"    {geo['msg']}")
-    else:
-        print(f"[-] GEOMETRY: No Triangle or Pennant formed yet.")
 
     # 4. SMART TRADE PLAN
     plan = data['trade_plan']
@@ -74,7 +80,7 @@ def print_report(data):
     for hl in s_data['headlines']:
         print(f"  - {hl}")
 
-    # 6. CONTEXT (Smart Money Included)
+    # 6. CONTEXT
     ctx = data['context']
     print(f"\n--- CONTEXT & SMART MONEY ---")
     print(f"Trend:           {ctx['trend']}")
@@ -84,13 +90,12 @@ def print_report(data):
     print(f"Support (20d):   Rp {ctx['support']:,.0f} (Dist: {ctx['dist_support']:.1f}%)")
     print(f"Resistance (20d):Rp {ctx['resistance']:,.0f}")
 
-    # 7. FIBONACCI (Dynamic Labels)
+    # 7. FIBONACCI
     print(f"\n--- FIBONACCI KEY LEVELS ---")
     fibs = ctx.get('fib_levels', {})
     curr_p = data['price']
     
     if fibs:
-        # Helper to determine label
         def get_fib_label(price):
             if curr_p > price: return "[SUPPORT]"
             elif curr_p < price: return "[RESISTANCE]"
@@ -117,20 +122,16 @@ def print_report(data):
     print("\n" + "="*60)
 
 def main():
-    # Setup CLI Argument Parser
     parser = argparse.ArgumentParser(description="IHSG Stock Validator with Custom Config")
-    
     parser.add_argument('ticker', nargs='?', help='Stock Ticker (e.g. BBCA)')
     parser.add_argument('--period', type=str, default=DEFAULT_CONFIG['BACKTEST_PERIOD'], help='Backtest Period (e.g. 1y, 2y)')
-    parser.add_argument('--hold', type=int, default=DEFAULT_CONFIG['MAX_HOLD_DAYS'], help='Max Hold Days for Grid Search')
+    parser.add_argument('--hold', type=int, default=DEFAULT_CONFIG['MAX_HOLD_DAYS'], help='Max Hold Days')
     parser.add_argument('--rsi', type=int, default=DEFAULT_CONFIG['RSI_PERIOD'], help='RSI Period')
     parser.add_argument('--sl', type=float, default=DEFAULT_CONFIG['SL_MULTIPLIER'], help='Stop Loss ATR Multiplier')
     parser.add_argument('--tp', type=float, default=DEFAULT_CONFIG['TP_MULTIPLIER'], help='Take Profit ATR Multiplier')
     parser.add_argument('--fib', type=int, default=DEFAULT_CONFIG['FIB_LOOKBACK_DAYS'], help='Fibonacci Lookback Days')
-    
-    # NEW: Smart Money Config Flags
-    parser.add_argument('--cmf', type=int, default=DEFAULT_CONFIG['CMF_PERIOD'], help='Chaikin Money Flow Period')
-    parser.add_argument('--mfi', type=int, default=DEFAULT_CONFIG['MFI_PERIOD'], help='Money Flow Index Period')
+    parser.add_argument('--cmf', type=int, default=DEFAULT_CONFIG['CMF_PERIOD'], help='CMF Period')
+    parser.add_argument('--mfi', type=int, default=DEFAULT_CONFIG['MFI_PERIOD'], help='MFI Period')
 
     args = parser.parse_args()
 
@@ -166,3 +167,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
