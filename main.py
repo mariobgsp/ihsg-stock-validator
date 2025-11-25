@@ -10,7 +10,7 @@ def clear_screen():
 def print_header():
     print("="*60)
     print("      SIMPLE IHSG STOCK VALIDATOR (Advanced)      ")
-    print("      Features: Config + Smart Money + Pattern + Candles")
+    print("      Features: Funda + Squeeze + Pivots + Smart Money")
     print("="*60)
 
 def print_report(data):
@@ -18,33 +18,32 @@ def print_report(data):
         print("\n[!] Error: Could not fetch data or invalid ticker.")
         return
 
-    # 1. Basic Info
     print(f"\nSTOCK: {data['name']} ({data['ticker']})")
     print(f"PRICE: Rp {data['price']:,.0f}")
-    
-    if data['is_ipo']:
-        print(f"[!] WARNING: IPO DETECTED ({data['days_listed']} days listed)")
+    if data['is_ipo']: print(f"[!] WARNING: IPO DETECTED ({data['days_listed']} days listed)")
 
-    # 2. VALIDATION SCORE (Moved Up)
+    # 1. FUNDAMENTAL CHECK
+    fund = data['context'].get('fundamental', {})
+    print(f"\n--- FUNDAMENTAL QUALITY ({fund.get('status')}) ---")
+    print(f"Market Cap:  Rp {fund.get('market_cap', 0):,.0f}")
+    print(f"EPS (TTM):   Rp {fund.get('eps', 0):,.2f}")
+    if fund.get('warning'):
+        print(f"WARNING:     {fund['warning']}")
+
+    # 2. VALIDATION SCORE
     val = data['validation']
     stars = "⭐" * val['score']
     print(f"\n--- CONFLUENCE SCORE: {val['score']}/5 {stars} ---")
     print(f"Verdict: {val['verdict']}")
     if val['reasons']:
         print(f"Factors: {', '.join(val['reasons'])}")
-    else:
-        print("Factors: None (Weak Setup)")
 
-    # 3. DUAL TRADE PLANS (Replaces the old "Big Action")
+    # 3. DUAL TRADE PLANS
     for plan in data['plans']:
         p_name = "⚡ SHORT TERM (1-5 Days)" if plan['type'] == "SHORT_TERM" else "🌊 SWING TERM (>5 Days)"
         print(f"\n{p_name}")
-        
-        # Determine color/emphasis based on status
         status_display = plan['status']
-        if "EXECUTE" in status_display:
-            status_display = f"!!! {status_display} !!!"
-            
+        if "EXECUTE" in status_display: status_display = f"!!! {status_display} !!!"
         print(f"Status:      {status_display}")
         
         if "PENDING" in plan['status']:
@@ -60,48 +59,33 @@ def print_report(data):
             print(f"TAKE PROFIT: Rp {plan['take_profit']:,.0f} (+{tp_pct:.1f}%)")
 
     # 4. CHART PATTERNS
-    print(f"\n--- CHART & CANDLE PATTERNS ---")
-    
+    print(f"\n--- CHART & PATTERNS ---")
     candle = data['context'].get('candle', {})
-    if candle.get('pattern') != "None":
-        print(f"[+] CANDLESTICK: {candle['pattern']}")
-        print(f"    Signal: {candle['sentiment']}")
-    else:
-        print(f"[-] Candle: No major reversal pattern detected.")
+    if candle.get('pattern') != "None": print(f"[+] CANDLE: {candle['pattern']} ({candle['sentiment']})")
+    
+    sqz = data['context'].get('squeeze', {})
+    if sqz.get('detected'): print(f"[!!!] TTM SQUEEZE: {sqz['msg']}")
 
     vcp = data['context'].get('vcp', {})
-    if vcp.get('detected'):
-        print(f"[+] VCP DETECTED: {vcp['msg']}")
-        
+    if vcp.get('detected'): print(f"[+] VCP: {vcp['msg']}")
+    
     geo = data['context'].get('geo', {})
-    if geo.get('pattern') != "None":
-        print(f"[+] GEOMETRY: {geo['pattern']}")
-        print(f"    {geo['msg']}")
+    if geo.get('pattern') != "None": print(f"[+] GEO: {geo['pattern']}")
 
-    # 5. NEWS SENTIMENT
-    print(f"\n--- NEWS SENTIMENT ---")
-    s_data = data['sentiment']
-    print(f"Rating: {s_data['sentiment']} (Score: {s_data['score']})")
-    if not s_data['headlines']:
-        print("  - No recent news found.")
-    for hl in s_data['headlines']:
-        print(f"  - {hl}")
-
-    # 6. CONTEXT
+    # 5. CONTEXT & PIVOTS
     ctx = data['context']
+    pivots = ctx.get('pivots', {})
     print(f"\n--- CONTEXT & SMART MONEY ---")
-    print(f"Trend:           {ctx['trend']}")
-    print(f"OBV Status:      {ctx['obv_status']}")
-    print(f"Money Flow:      {ctx['smart_money']}") 
-    print(f"Volatility(ATR): Rp {ctx['atr']:,.0f} (Daily Range)")
-    print(f"Support (20d):   Rp {ctx['support']:,.0f} (Dist: {ctx['dist_support']:.1f}%)")
-    print(f"Resistance (20d):Rp {ctx['resistance']:,.0f}")
+    print(f"Trend:       {ctx['trend']}")
+    print(f"Smart Money: {ctx['smart_money']}")
+    print(f"Pivot (P):   Rp {pivots.get('P', 0):,.0f}")
+    print(f"Supp (S1):   Rp {pivots.get('S1', 0):,.0f}")
+    print(f"Resis (R1):  Rp {pivots.get('R1', 0):,.0f}")
 
-    # 7. FIBONACCI
+    # 6. FIBONACCI LEVELS (RESTORED)
     print(f"\n--- FIBONACCI KEY LEVELS ---")
     fibs = ctx.get('fib_levels', {})
     curr_p = data['price']
-    
     if fibs:
         def get_fib_label(price):
             if curr_p > price: return "[SUPPORT]"
@@ -114,41 +98,33 @@ def print_report(data):
         print(f"0.618 GOLDEN:    Rp {fibs.get('0.618 (Golden)', 0):,.0f} {get_fib_label(fibs.get('0.618 (Golden)', 0))}")
         print(f"Low (1.0):       Rp {fibs.get('1.0 (Low)', 0):,.0f} {get_fib_label(fibs.get('1.0 (Low)', 0))}")
 
+    # 7. NEWS SENTIMENT
+    print(f"\n--- NEWS SENTIMENT ---")
+    s_data = data['sentiment']
+    print(f"Score: {s_data['score']} ({s_data['sentiment']})")
+    for hl in s_data['headlines']: print(f"- {hl}")
+
     print("\n" + "="*60)
 
 def main():
-    parser = argparse.ArgumentParser(description="IHSG Stock Validator with Custom Config")
-    
-    parser.add_argument('ticker', nargs='?', help='Stock Ticker (e.g. BBCA)')
-    parser.add_argument('--period', type=str, default=DEFAULT_CONFIG['BACKTEST_PERIOD'], help='Backtest Period (e.g. 1y, 2y)')
-    parser.add_argument('--hold', type=int, default=DEFAULT_CONFIG['MAX_HOLD_DAYS'], help='Max Hold Days')
-    parser.add_argument('--rsi', type=int, default=DEFAULT_CONFIG['RSI_PERIOD'], help='RSI Period')
-    parser.add_argument('--sl', type=float, default=DEFAULT_CONFIG['SL_MULTIPLIER'], help='Stop Loss ATR Multiplier')
-    parser.add_argument('--tp', type=float, default=DEFAULT_CONFIG['TP_MULTIPLIER'], help='Take Profit ATR Multiplier')
-    
-    # Argument Flags
-    parser.add_argument('--fib', type=int, default=DEFAULT_CONFIG['FIB_LOOKBACK_DAYS'], help='Fibonacci Lookback Days')
-    parser.add_argument('--cmf', type=int, default=DEFAULT_CONFIG['CMF_PERIOD'], help='CMF Period')
-    parser.add_argument('--mfi', type=int, default=DEFAULT_CONFIG['MFI_PERIOD'], help='MFI Period')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('ticker', nargs='?')
+    parser.add_argument('--period', default=DEFAULT_CONFIG['BACKTEST_PERIOD'])
+    parser.add_argument('--sl', type=float, default=DEFAULT_CONFIG['SL_MULTIPLIER'])
+    parser.add_argument('--tp', type=float, default=DEFAULT_CONFIG['TP_MULTIPLIER'])
+    parser.add_argument('--fib', type=int, default=DEFAULT_CONFIG['FIB_LOOKBACK_DAYS'])
+    parser.add_argument('--cmf', type=int, default=DEFAULT_CONFIG['CMF_PERIOD'])
+    parser.add_argument('--mfi', type=int, default=DEFAULT_CONFIG['MFI_PERIOD'])
 
     args = parser.parse_args()
 
     if not args.ticker:
         clear_screen()
         print_header()
-        ticker_input = input("\nEnter Ticker (e.g. BBCA, ANTM): ").strip()
-        if not ticker_input:
-            print("No ticker provided. Exiting.")
-            return
-        args.ticker = ticker_input
-    else:
-        clear_screen()
-        print_header()
+        args.ticker = input("\nEnter Ticker (e.g. BBCA, ANTM): ").strip()
 
     user_config = {
         "BACKTEST_PERIOD": args.period,
-        "MAX_HOLD_DAYS": args.hold,
-        "RSI_PERIOD": args.rsi,
         "SL_MULTIPLIER": args.sl,
         "TP_MULTIPLIER": args.tp,
         "FIB_LOOKBACK_DAYS": args.fib,
@@ -157,11 +133,8 @@ def main():
     }
 
     print(f"\nAnalyzing {args.ticker.upper()}... (Config: {user_config})")
-    
     analyzer = StockAnalyzer(args.ticker, user_config)
-    report_data = analyzer.generate_final_report()
-    
-    print_report(report_data)
+    print_report(analyzer.generate_final_report())
 
 if __name__ == "__main__":
     main()
