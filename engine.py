@@ -13,14 +13,13 @@ from datetime import datetime, timedelta
 # ==========================================
 DEFAULT_CONFIG = {
     "BACKTEST_PERIOD": "2y",
-    "MAX_HOLD_DAYS": 60, # Extended for Swing (3 Months)
+    "MAX_HOLD_DAYS": 60,
     "FIB_LOOKBACK_DAYS": 120,
     "RSI_PERIOD": 14,
     "RSI_LOWER": 30,
     "ATR_PERIOD": 14,
-    # Unified Swing Defaults
-    "SL_MULTIPLIER": 2.5, 
-    "TP_MULTIPLIER": 5.0, 
+    "SL_MULTIPLIER": 2.0,
+    "TP_MULTIPLIER": 3.0,
     "CMF_PERIOD": 20,
     "MFI_PERIOD": 14,
     "VOL_MA_PERIOD": 20,
@@ -32,7 +31,7 @@ MA_TEST_PAIRS = [(5, 20), (20, 50), (50, 200)]
 STOCH_K_PERIOD = 14
 STOCH_D_PERIOD = 3
 STOCH_OVERSOLD = 20
-OBV_LOOKBACK_DAYS = 10
+OBV_LOOKBACK_DAYS = 5
 TREND_EMA_DEFAULT = 200
 
 class StockAnalyzer:
@@ -494,9 +493,20 @@ class StockAnalyzer:
         if "BUY" in action:
             plan['entry'] = self.adjust_to_tick_size(current_price)
             plan['status'] = "EXECUTE NOW (Market)"
-            plan['stop_loss'] = self.adjust_to_tick_size(current_price - (atr * sl_mult))
-            plan['take_profit'] = self.adjust_to_tick_size(current_price + (atr * tp_mult))
+            
+            # Option A: Dynamic (ATR)
+            sl_price = self.adjust_to_tick_size(current_price - (atr * sl_mult))
+            tp_price = self.adjust_to_tick_size(current_price + (atr * tp_mult))
+            
+            plan['stop_loss'] = sl_price
+            plan['take_profit'] = tp_price
             plan['risk_reward'] = f"1:{tp_mult/sl_mult:.1f}"
+
+            # Option B: Aggressive 1:3
+            risk = current_price - sl_price
+            if risk > 0:
+                tp_3r = current_price + (risk * 3.0)
+                plan['take_profit_3r'] = self.adjust_to_tick_size(tp_3r)
             
         elif "WAIT" in action:
             plan['status'] = "PENDING (Limit)"
@@ -516,8 +526,19 @@ class StockAnalyzer:
 
             plan['entry'] = self.adjust_to_tick_size(target_price)
             if plan['entry'] > 0:
-                plan['stop_loss'] = self.adjust_to_tick_size(plan['entry'] - (atr * sl_mult))
+                # Calc SL based on projected entry
+                sl_price = self.adjust_to_tick_size(plan['entry'] - (atr * sl_mult))
+                plan['stop_loss'] = sl_price
+                
+                # Dynamic TP
                 plan['take_profit'] = self.adjust_to_tick_size(plan['entry'] + (atr * tp_mult))
+                
+                # Aggressive 1:3 TP
+                risk = plan['entry'] - sl_price
+                if risk > 0:
+                    tp_3r = plan['entry'] + (risk * 3.0)
+                    plan['take_profit_3r'] = self.adjust_to_tick_size(tp_3r)
+                
                 plan['risk_reward'] = "Projection"
             
         return plan
