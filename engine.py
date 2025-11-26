@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 # ==========================================
 DEFAULT_CONFIG = {
     "BACKTEST_PERIOD": "2y",
-    "MAX_HOLD_DAYS": 20,
+    "MAX_HOLD_DAYS": 60,
     "FIB_LOOKBACK_DAYS": 120,
     "RSI_PERIOD": 14,
     "RSI_LOWER": 30,
@@ -31,7 +31,7 @@ MA_TEST_PAIRS = [(5, 20), (20, 50), (50, 200)]
 STOCH_K_PERIOD = 14
 STOCH_D_PERIOD = 3
 STOCH_OVERSOLD = 20
-OBV_LOOKBACK_DAYS = 5
+OBV_LOOKBACK_DAYS = 10
 TREND_EMA_DEFAULT = 200
 
 class StockAnalyzer:
@@ -58,7 +58,6 @@ class StockAnalyzer:
         try:
             period = self.config["BACKTEST_PERIOD"]
             self.df = yf.download(self.ticker, period=period, progress=False, auto_adjust=True)
-            
             try:
                 self.market_df = yf.download(self.market_ticker, period=period, progress=False, auto_adjust=True)
                 if isinstance(self.market_df.columns, pd.MultiIndex):
@@ -66,10 +65,8 @@ class StockAnalyzer:
             except: self.market_df = None
 
             if self.df.empty: return False
-            
             if isinstance(self.df.columns, pd.MultiIndex):
                 self.df.columns = self.df.columns.get_level_values(0)
-            
             self.data_len = len(self.df)
 
             ticker_obj = yf.Ticker(self.ticker)
@@ -130,7 +127,7 @@ class StockAnalyzer:
         except Exception as e:
             self.news_analysis = {"sentiment": "Error", "score": 0, "headlines": [str(e)]}
 
-    # --- MANUAL INDICATOR CALCULATIONS ---
+    # --- MATH HELPERS ---
     def calc_rsi(self, series, period):
         delta = series.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -147,12 +144,14 @@ class StockAnalyzer:
     def calc_std(self, series, period):
         return series.rolling(window=period).std()
 
-    def calc_stoch(self, high, low, close, k_period, d_period):
-        lowest_low = low.rolling(window=k_period).min()
-        highest_high = high.rolling(window=k_period).max()
-        k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
-        d = k.rolling(window=d_period).mean()
-        return k, d
+    def calc_slope(self, series, period=20):
+        if len(series) < period: return 0
+        y = series.iloc[-period:].values
+        x = np.arange(len(y))
+        try:
+            slope, _ = np.polyfit(x, y, 1)
+            return slope
+        except: return 0
 
     def calc_atr(self, high, low, close, period):
         tr1 = high - low
@@ -178,34 +177,28 @@ class StockAnalyzer:
         mf_volume = mf_multiplier * volume
         return mf_volume.rolling(window=period).sum() / volume.rolling(window=period).sum()
 
+    def calc_stoch(self, high, low, close, k_period, d_period):
+        lowest_low = low.rolling(window=k_period).min()
+        highest_high = high.rolling(window=k_period).max()
+        k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+        d = k.rolling(window=d_period).mean()
+        return k, d
+
     def prepare_indicators(self):
         if self.df is None or self.df.empty: return
 
-        if self.data_len >= 200:
-            self.df['EMA_200'] = self.calc_ema(self.df['Close'], 200)
-            self.active_trend_col = 'EMA_200'
-        elif self.data_len >= 50:
-            self.df['EMA_50'] = self.calc_ema(self.df['Close'], 50)
-            self.active_trend_col = 'EMA_50'
-        else:
-            self.df['EMA_20'] = self.calc_ema(self.df['Close'], 20)
-            self.active_trend_col = 'EMA_20'
+        self.df['EMA_50'] = self.calc_ema(self.df['Close'], 50)
+        self.df['EMA_150'] = self.calc_ema(self.df['Close'], 150)
+        self.df['EMA_200'] = self.calc_ema(self.df['Close'], 200)
+        self.active_trend_col = 'EMA_200'
 
         rsi_p = self.config["RSI_PERIOD"]
-        if self.data_len > rsi_p:
-            self.df['RSI'] = self.calc_rsi(self.df['Close'], rsi_p)
-            k, d = self.calc_stoch(self.df['High'], self.df['Low'], self.df['Close'], STOCH_K_PERIOD, STOCH_D_PERIOD)
-            self.df[f"STOCHk"] = k
-            self.df[f"STOCHd"] = d
+        self.df['RSI'] = self.calc_rsi(self.df['Close'], rsi_p)
+        k, d = self.calc_stoch(self.df['High'], self.df['Low'], self.df['Close'], STOCH_K_PERIOD, STOCH_D_PERIOD)
+        self.df[f"STOCHk"] = k
+        self.df[f"STOCHd"] = d
 
-        for fast, slow in MA_TEST_PAIRS:
-            if self.data_len > slow:
-                self.df[f'EMA_{fast}'] = self.calc_ema(self.df['Close'], fast)
-                self.df[f'EMA_{slow}'] = self.calc_ema(self.df['Close'], slow)
-
-        cmf_p = self.config["CMF_PERIOD"]
-        mfi_p = self.config["MFI_PERIOD"]
-        vol_p = self.config["VOL_MA_PERIOD"]
+        cmf_p, mfi_p, vol_p = self.config["CMF_PERIOD"], self.config["MFI_PERIOD"], self.config["VOL_MA_PERIOD"]
         self.df['OBV'] = self.calc_obv(self.df['Close'], self.df['Volume'])
         self.df['CMF'] = self.calc_cmf(self.df['High'], self.df['Low'], self.df['Close'], self.df['Volume'], cmf_p)
         self.df['MFI'] = self.calc_mfi(self.df['High'], self.df['Low'], self.df['Close'], self.df['Volume'], mfi_p)
@@ -214,6 +207,45 @@ class StockAnalyzer:
 
         atr_p = self.config["ATR_PERIOD"]
         self.df['ATR'] = self.calc_atr(self.df['High'], self.df['Low'], self.df['Close'], atr_p)
+
+    def check_trend_template(self):
+        res = {"status": "FAIL", "score": 0, "details": []}
+        try:
+            if self.data_len < 260:
+                res["details"].append("Insufficient data for full trend check")
+                return res
+
+            curr = self.df['Close'].iloc[-1]
+            ema_50 = self.df['EMA_50'].iloc[-1]
+            ema_150 = self.df['EMA_150'].iloc[-1]
+            ema_200 = self.df['EMA_200'].iloc[-1]
+            
+            year_high = self.df['High'].iloc[-260:].max()
+            year_low = self.df['Low'].iloc[-260:].min()
+            
+            c1 = curr > ema_150 and curr > ema_200
+            c2 = ema_150 > ema_200
+            slope_200 = self.calc_slope(self.df['EMA_200'], 20)
+            c3 = slope_200 > 0
+            c4 = curr > ema_50
+            c5 = curr >= (1.25 * year_low)
+            c6 = curr >= (0.75 * year_high)
+            
+            score = sum([c1, c2, c3, c4, c5, c6])
+            res["score"] = score
+            
+            if score == 6: res["status"] = "PERFECT UPTREND (Stage 2)"
+            elif score >= 4: res["status"] = "STRONG UPTREND"
+            elif score <= 2: res["status"] = "DOWNTREND / BASE"
+                
+            if c1 and c2: res["details"].append("MA Alignment (Price > 150 > 200)")
+            if c3: res["details"].append("200-Day MA Rising")
+            if c5: res["details"].append("> 25% Off Lows (Momentum)")
+            if c6: res["details"].append("Near 52-Week Highs (Leader)")
+            if not c4: res["details"].append("WARNING: Price below 50 EMA")
+
+        except Exception as e: res["details"].append(f"Error: {str(e)}")
+        return res
 
     def run_backtest_simulation(self, condition_series, hold_days):
         if condition_series is None: return 0.0 
@@ -238,14 +270,12 @@ class StockAnalyzer:
                     if wr > best_res['win_rate']:
                         best_res = {"strategy": "RSI Reversal", "details": f"RSI < {level}", "win_rate": wr, "hold_days": days, "is_triggered_today": self.df['RSI'].iloc[-1] < level}
 
-        for fast, slow in MA_TEST_PAIRS:
-            fast_col, slow_col = f'EMA_{fast}', f'EMA_{slow}'
-            if fast_col in self.df.columns and slow_col in self.df.columns:
-                condition = self.df[fast_col] > self.df[slow_col]
-                for days in range(days_min, days_max + 1):
-                    wr = self.run_backtest_simulation(condition, days)
-                    if wr > best_res['win_rate']:
-                        best_res = {"strategy": "MA Momentum", "details": f"Uptrend (EMA {fast} > EMA {slow})", "win_rate": wr, "hold_days": days, "is_triggered_today": self.df[fast_col].iloc[-1] > self.df[slow_col].iloc[-1]}
+        if 'EMA_50' in self.df.columns and self.df['EMA_50'].iloc[-1] > self.df['EMA_200'].iloc[-1]:
+             condition = self.df['EMA_50'] > self.df['EMA_200'] 
+             for days in range(days_min, days_max + 1):
+                wr = self.run_backtest_simulation(condition, days)
+                if wr > best_res['win_rate']:
+                    best_res = {"strategy": "MA Trend", "details": "Trend Following (50 > 200)", "win_rate": wr, "hold_days": days, "is_triggered_today": True}
 
         if 'STOCHk' in self.df.columns:
             condition = (self.df['STOCHk'] < STOCH_OVERSOLD) & (self.df['STOCHk'] > self.df['STOCHd'])
@@ -376,14 +406,13 @@ class StockAnalyzer:
         except Exception: pass
         return res
 
-    def validate_signal(self, action, context):
+    def validate_signal(self, action, context, trend_template):
         score = 0
         reasons = []
         
-        fund = context.get('fundamental', {})
-        if fund.get('status') == "GOOD": score += 1; reasons.append("Solid Fundamentals")
-        elif "High Risk" in fund.get('status', ''): score -= 1; reasons.append("RISK: Small Cap / Gorengan")
-
+        if trend_template["status"] in ["PERFECT UPTREND (Stage 2)", "STRONG UPTREND"]:
+            score += 2; reasons.append("Stage 2 Uptrend (Minervini)")
+        
         rvol = self.df['RVOL'].iloc[-1] if 'RVOL' in self.df.columns else 1.0
         if rvol > 1.2: score += 1; reasons.append("High Volume")
         
@@ -392,14 +421,13 @@ class StockAnalyzer:
         if self.market_df is not None and len(self.market_df) > 5:
             s_ret = (self.df['Close'].iloc[-1] - self.df['Close'].iloc[-5]) / self.df['Close'].iloc[-5]
             m_ret = (self.market_df['Close'].iloc[-1] - self.market_df['Close'].iloc[-5]) / self.market_df['Close'].iloc[-5]
-            if s_ret > m_ret: score += 1; reasons.append("Outperforming IHSG")
+            if s_ret > m_ret: score += 1; reasons.append("Leader vs IHSG")
                 
         if context['squeeze']['detected']: score += 2; reasons.append("TTM Squeeze Firing")
 
         verdict = "WEAK"
-        if score >= 4: verdict = "STRONG CONVICTION"
-        elif score >= 2: verdict = "MODERATE"
-        
+        if score >= 5: verdict = "ELITE SWING SETUP"
+        elif score >= 3: verdict = "MODERATE"
         return score, verdict, reasons
 
     def get_market_context(self):
@@ -446,24 +474,21 @@ class StockAnalyzer:
         }
 
     def adjust_to_tick_size(self, price):
-        """Adjusts price to the nearest valid IDX tick size."""
-        if price < 200:
-            tick = 1
-        elif price < 500:
-            tick = 2
-        elif price < 2000:
-            tick = 5
-        elif price < 5000:
-            tick = 10
-        else:
-            tick = 25
-        
+        if price < 200: tick = 1
+        elif price < 500: tick = 2
+        elif price < 2000: tick = 5
+        elif price < 5000: tick = 10
+        else: tick = 25
         return round(price / tick) * tick
 
-    def calculate_trade_plan(self, plan_type, action, current_price, atr, support, resistance, best_strategy, fib_levels, pivots):
+    def calculate_trade_plan(self, plan_type, action, current_price, atr, support, resistance, best_strategy, fib_levels, pivots, trend_status):
         plan = {"type": plan_type, "entry": 0, "stop_loss": 0, "take_profit": 0, "risk_reward": "N/A", "status": "ACTIVE"}
         sl_mult = 1.5 if plan_type == "SHORT_TERM" else self.config["SL_MULTIPLIER"]
         tp_mult = 2.0 if plan_type == "SHORT_TERM" else 4.0
+
+        # SWING logic update: Be more patient if not in Stage 2
+        if plan_type == "SWING" and "UPTREND" not in trend_status:
+             action = "WAIT" # Force wait if Minervini trend is broken
 
         if "BUY" in action:
             plan['entry'] = self.adjust_to_tick_size(current_price)
@@ -475,37 +500,22 @@ class StockAnalyzer:
         elif "WAIT" in action:
             plan['status'] = "PENDING (Limit)"
             strategy_type = best_strategy.get('strategy', 'None')
-            
-            target_price = support # Default
+            target_price = support 
             
             if "RSI" in strategy_type or "Stoch" in strategy_type:
                 target_fib = 0
                 for _, price in sorted(fib_levels.items(), key=lambda x: x[1], reverse=True):
-                    if price < current_price:
-                        target_fib = price
-                        break
+                    if price < current_price: target_fib = price; break
                 
-                # SMART SELECTION: Use Pivot for Short Term, Fib for Swing
                 s1 = pivots.get("S1", 0)
-                
                 if plan_type == "SHORT_TERM":
-                    if s1 > (current_price * 0.85): 
-                        target_price = s1
-                        plan['note'] = "Wait for Pivot S1"
-                    else:
-                        target_price = support
-                        plan['note'] = "Wait for Support"
-                else: # SWING
-                    if target_fib > (current_price * 0.85):
-                        target_price = target_fib
-                        plan['note'] = "Wait for Fib Support"
-                    else:
-                        target_price = support
-                        plan['note'] = "Wait for Major Support"
-            
+                    if s1 > (current_price * 0.85): target_price = s1; plan['note'] = "Wait for Pivot S1"
+                    else: target_price = support; plan['note'] = "Wait for Support"
+                else: 
+                    if target_fib > (current_price * 0.85): target_price = target_fib; plan['note'] = "Wait for Fib Support"
+                    else: target_price = support; plan['note'] = "Wait for Major Support"
             elif "MA" in strategy_type:
-                target_price = resistance
-                plan['note'] = "Buy Breakout"
+                target_price = resistance; plan['note'] = "Buy Breakout"
 
             plan['entry'] = self.adjust_to_tick_size(target_price)
             if plan['entry'] > 0:
@@ -521,27 +531,29 @@ class StockAnalyzer:
         self.analyze_news_sentiment()
         
         best_short = self.optimize_stock(1, 5)
-        best_swing = self.optimize_stock(6, 60)
+        best_swing = self.optimize_stock(10, 60)
         ctx = self.get_market_context()
+        trend_template = self.check_trend_template()
         
         action_short = "WAIT"
         if best_short['is_triggered_today']: action_short = "ACTION: BUY (Signal)"
         elif ctx['dist_support'] < 2.0: action_short = "ACTION: BUY (Support Scalp)"
         
         action_swing = "WAIT"
-        if best_swing['is_triggered_today'] and ctx['trend'] == "UPTREND": action_swing = "ACTION: BUY (Trend)"
+        if best_swing['is_triggered_today'] and trend_template['score'] >= 4: action_swing = "ACTION: BUY (Trend)"
         elif ctx['dist_support'] < 3.0 and ctx['smart_money'] == "INSTITUTIONAL BUYING": action_swing = "ACTION: BUY (Accumulation)"
 
-        val_score, val_verdict, val_reasons = self.validate_signal(action_short if action_short == "BUY" else action_swing, ctx)
+        val_score, val_verdict, val_reasons = self.validate_signal(action_short if action_short == "BUY" else action_swing, ctx, trend_template)
 
-        plan_short = self.calculate_trade_plan("SHORT_TERM", action_short, ctx['price'], ctx['atr'], ctx['support'], ctx['resistance'], best_short, ctx['fib_levels'], ctx['pivots'])
-        plan_swing = self.calculate_trade_plan("SWING", action_swing, ctx['price'], ctx['atr'], ctx['support'], ctx['resistance'], best_swing, ctx['fib_levels'], ctx['pivots'])
+        plan_short = self.calculate_trade_plan("SHORT_TERM", action_short, ctx['price'], ctx['atr'], ctx['support'], ctx['resistance'], best_short, ctx['fib_levels'], ctx['pivots'], "UPTREND")
+        plan_swing = self.calculate_trade_plan("SWING", action_swing, ctx['price'], ctx['atr'], ctx['support'], ctx['resistance'], best_swing, ctx['fib_levels'], ctx['pivots'], trend_template['status'])
 
         return {
             "ticker": self.ticker, "name": self.info.get('longName', self.ticker),
             "price": ctx['price'], "sentiment": self.news_analysis, "context": ctx,
             "plans": [plan_short, plan_swing],
             "validation": {"score": val_score, "verdict": val_verdict, "reasons": val_reasons},
+            "trend_template": trend_template, 
             "is_ipo": self.data_len < 200, "days_listed": self.data_len
         }
 
