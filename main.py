@@ -80,13 +80,21 @@ def print_report(data):
 
     vcp = ctx.get('vcp', {})
     if vcp.get('detected'): print(f"[+] {vcp['msg']}")
+    
+    geo = ctx.get('geo', {})
+    if geo.get('pattern') != "None": 
+        print(f"[+] GEO: {geo['pattern']}")
+        print(f"    {geo['msg']}")
+        
+        # NEW: Empirical Pattern Backtest Result
+        p_stats = ctx.get('pattern_stats', {})
+        if p_stats.get('count', 0) > 0:
+            print(f"    ↳ Historical Reliability: {p_stats['accuracy']} ({p_stats['wins']}/{p_stats['count']} Wins)")
+            print(f"    ↳ Projection: {p_stats['verdict']}")
 
     # 5. CONTEXT & PIVOTS
-    ctx = data['context']
     pivots = ctx.get('pivots', {})
-    print(f"\n--- CONTEXT & SMART MONEY ---")
-    print(f"Trend:       {ctx['trend']}")
-    print(f"Smart Money: {ctx['smart_money']}")
+    print(f"\n--- PIVOT POINTS (Daily) ---")
     print(f"Pivot (P):   Rp {pivots.get('P', 0):,.0f}")
     print(f"Supp (S1):   Rp {pivots.get('S1', 0):,.0f}")
     print(f"Resis (R1):  Rp {pivots.get('R1', 0):,.0f}")
