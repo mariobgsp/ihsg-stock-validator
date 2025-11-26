@@ -60,9 +60,15 @@ def print_report(data):
     
     if plan['entry'] > 0:
         sl_pct = ((plan['stop_loss'] - plan['entry']) / plan['entry']) * 100
-        tp_pct = ((plan['take_profit'] - plan['entry']) / plan['entry']) * 100
+        tp_pct_dyn = ((plan['take_profit'] - plan['entry']) / plan['entry']) * 100
+        
         print(f"STOP LOSS:   Rp {plan['stop_loss']:,.0f} ({sl_pct:.1f}%)")
-        print(f"TAKE PROFIT: Rp {plan['take_profit']:,.0f} (+{tp_pct:.1f}%)")
+        print("-" * 30)
+        print(f"TARGET A:    Rp {plan['take_profit']:,.0f} (+{tp_pct_dyn:.1f}%) [Conservative]")
+        
+        if 'take_profit_3r' in plan:
+            tp_pct_3r = ((plan['take_profit_3r'] - plan['entry']) / plan['entry']) * 100
+            print(f"TARGET B:    Rp {plan['take_profit_3r']:,.0f} (+{tp_pct_3r:.1f}%) [Max Profit 1:3]")
 
     # 4. CONTEXT & PATTERNS
     print(f"\n--- MARKET CONTEXT ---")
@@ -142,3 +148,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
