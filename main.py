@@ -59,12 +59,14 @@ def print_report(data):
 
     status_display = plan['status']
     if "EXECUTE" in status_display: status_display = f"!!! {status_display} !!!"
+    elif "EARLY ENTRY" in status_display: status_display = f"*** {status_display} ***"
     print(f"Status:      {status_display}")
     
     if "PENDING" in plan['status']:
             print(f"Note:        {plan.get('note', '')}")
             print(f"WAIT FOR:    Rp {plan['entry']:,.0f}")
     else:
+            if plan.get('note'): print(f"Note:        {plan['note']}")
             print(f"ENTRY:       Rp {plan['entry']:,.0f}")
     
     if plan['entry'] > 0:
@@ -86,7 +88,7 @@ def print_report(data):
     # Smart Money Section
     print(f"Smart Money: {ctx['smart_money']}")
     
-    # NEW: BANDAR BEHAVIOR (Dynamic Horizon)
+    # BANDAR BEHAVIOR (Dynamic Horizon)
     beh = ctx.get('breakout_behavior', {})
     if beh.get('count', 0) > 0:
         horizon = beh.get('best_horizon', 5)
@@ -113,6 +115,10 @@ def print_report(data):
     
     vol_brk = ctx.get('vol_breakout', {})
     if vol_brk.get('detected'): print(f"[!!!] {vol_brk['msg']}")
+    
+    # Low Cheat Display
+    lc = ctx.get('low_cheat', {})
+    if lc.get('detected'): print(f"[***] {lc['msg']}")
 
     vcp = ctx.get('vcp', {})
     if vcp.get('detected'): print(f"[+] {vcp['msg']}")
