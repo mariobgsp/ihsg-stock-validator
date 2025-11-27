@@ -13,13 +13,13 @@ from datetime import datetime, timedelta
 # ==========================================
 DEFAULT_CONFIG = {
     "BACKTEST_PERIOD": "2y",
-    "MAX_HOLD_DAYS": 60, # 3 Months (Trading Days)
+    "MAX_HOLD_DAYS": 60,
     "FIB_LOOKBACK_DAYS": 120,
     "RSI_PERIOD": 14,
     "RSI_LOWER": 30,
     "ATR_PERIOD": 14,
-    "SL_MULTIPLIER": 2.5, # Default Wider for Swing Safety
-    "TP_MULTIPLIER": 5.0, 
+    "SL_MULTIPLIER": 2.5,
+    "TP_MULTIPLIER": 5.0,
     "CMF_PERIOD": 20,
     "MFI_PERIOD": 14,
     "VOL_MA_PERIOD": 20,
@@ -424,16 +424,11 @@ class StockAnalyzer:
         verdict = "Likely Success" if win_rate > 60 else "Likely Fail" if win_rate < 40 else "Coin Flip"
         return { "accuracy": f"{win_rate:.1f}%", "count": total_patterns, "verdict": verdict, "wins": wins }
 
-    # --- NEW: IMPROVED VOLUME BREAKOUT (Liquidity Check) ---
+    # --- VOLUME BREAKOUT DETECTION ---
     def detect_volume_breakout(self):
-        """
-        Detects high volume breakout.
-        Improved: Uses Price * Volume (Transaction Value) to detect real liquidity.
-        """
         res = {"detected": False, "msg": ""}
         try:
             if self.data_len < 2: return res
-            
             c0 = self.df.iloc[-1] 
             c1 = self.df.iloc[-2] 
             
@@ -441,9 +436,8 @@ class StockAnalyzer:
             is_up = c0['Close'] > c1['Close']
             vol_ok = c0['Volume'] > c0['VOL_MA']
             
-            # Dynamic Liquidity Check
             tx_value = c0['Close'] * c0['Volume']
-            min_liq = self.config["MIN_DAILY_VOL"] # Can be 0 if configured via CLI
+            min_liq = self.config["MIN_DAILY_VOL"]
             liq_ok = tx_value > min_liq
             
             if is_green and is_up and vol_ok and liq_ok:
@@ -466,6 +460,36 @@ class StockAnalyzer:
         except Exception: pass
         return res
 
+    # --- PROBABILITY CALCULATOR ---
+    def calculate_probability(self, best_strategy, context, trend_template):
+        base_prob = best_strategy.get('win_rate', 50)
+        if base_prob < 0: base_prob = 50
+        prob = base_prob
+        
+        # Trend Impact
+        if trend_template["status"] in ["PERFECT UPTREND (Stage 2)", "STRONG UPTREND"]: prob += 15
+        elif trend_template["status"] == "DOWNTREND / BASE": prob -= 20
+            
+        # Money Flow
+        if "BUYING" in context['smart_money']: prob += 10
+        elif "SELLING" in context['smart_money']: prob -= 10
+        
+        # Volume Breakout
+        if context['vol_breakout']['detected']: prob += 5
+        
+        # Pattern & Candlestick
+        if context['vcp']['detected'] or context['geo']['pattern'] != "None": prob += 5
+        if "Success" in context['pattern_stats'].get('verdict', ''): prob += 5
+        if "Bullish" in context['candle']['sentiment']: prob += 5
+        
+        prob = max(1, min(99, prob))
+        
+        verdict = "LOW PROBABILITY"
+        if prob >= 75: verdict = "HIGH PROBABILITY"
+        elif prob >= 60: verdict = "MODERATE PROBABILITY"
+        
+        return {"value": prob, "verdict": verdict}
+
     def validate_signal(self, action, context, trend_template):
         score = 0
         reasons = []
@@ -476,7 +500,6 @@ class StockAnalyzer:
         rvol = self.df['RVOL'].iloc[-1] if 'RVOL' in self.df.columns else 1.0
         if rvol > 1.2: score += 1; reasons.append("High Volume")
         
-        # Volume Breakout Override
         if context['vol_breakout']['detected']:
              score += 2; reasons.append("Abnormal Accumulation Day")
         
@@ -545,7 +568,7 @@ class StockAnalyzer:
             "squeeze": self.detect_ttm_squeeze(),
             "pivots": self.calculate_pivot_points(),
             "pattern_stats": pattern_stats,
-            "vol_breakout": self.detect_volume_breakout() # NEW FIELD
+            "vol_breakout": self.detect_volume_breakout()
         }
 
     def adjust_to_tick_size(self, price):
@@ -630,6 +653,8 @@ class StockAnalyzer:
             action = "ACTION: BUY (Vol Breakout)"
 
         val_score, val_verdict, val_reasons = self.validate_signal(action, ctx, trend_template)
+        
+        prob_data = self.calculate_probability(best_strategy, ctx, trend_template)
 
         plan = self.calculate_trade_plan("OPTIMIZED_SWING", action, ctx['price'], ctx['atr'], ctx['support'], ctx['resistance'], best_strategy, ctx['fib_levels'], ctx['pivots'], trend_template['status'])
 
@@ -638,6 +663,7 @@ class StockAnalyzer:
             "price": ctx['price'], "sentiment": self.news_analysis, "context": ctx,
             "plans": [plan], 
             "validation": {"score": val_score, "verdict": val_verdict, "reasons": val_reasons},
+            "probability": prob_data,
             "trend_template": trend_template, 
             "is_ipo": self.data_len < 200, "days_listed": self.data_len
         }
