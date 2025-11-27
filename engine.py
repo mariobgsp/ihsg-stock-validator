@@ -13,13 +13,13 @@ from datetime import datetime, timedelta
 # ==========================================
 DEFAULT_CONFIG = {
     "BACKTEST_PERIOD": "2y",
-    "MAX_HOLD_DAYS": 60, # 3 Months (Trading Days)
+    "MAX_HOLD_DAYS": 60,
     "FIB_LOOKBACK_DAYS": 120,
     "RSI_PERIOD": 14,
     "RSI_LOWER": 30,
     "ATR_PERIOD": 14,
-    "SL_MULTIPLIER": 2.5, # Default Wider for Swing Safety
-    "TP_MULTIPLIER": 5.0, 
+    "SL_MULTIPLIER": 2.5,
+    "TP_MULTIPLIER": 5.0,
     "CMF_PERIOD": 20,
     "MFI_PERIOD": 14,
     "VOL_MA_PERIOD": 20,
@@ -187,7 +187,7 @@ class StockAnalyzer:
         k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
         d = k.rolling(window=d_period).mean()
         return k, d
-        
+    
     def calc_amihud(self, close, volume, period):
         ret = close.pct_change().abs()
         dol_vol = close * volume
@@ -216,7 +216,6 @@ class StockAnalyzer:
         self.df['RVOL'] = self.df['Volume'] / self.df['VOL_MA']
         
         self.df['EFI'] = self.calc_force_index(self.df['Close'], self.df['Volume'], 13)
-        
         tp = (self.df['High'] + self.df['Low'] + self.df['Close']) / 3
         self.df['VWAP'] = (tp * self.df['Volume']).rolling(20).sum() / self.df['Volume'].rolling(20).sum()
         self.df['AMIHUD'] = self.calc_amihud(self.df['Close'], self.df['Volume'], 20)
@@ -235,7 +234,6 @@ class StockAnalyzer:
             ema_50 = self.df['EMA_50'].iloc[-1]
             ema_150 = self.df['EMA_150'].iloc[-1]
             ema_200 = self.df['EMA_200'].iloc[-1]
-            
             year_high = self.df['High'].iloc[-260:].max()
             year_low = self.df['Low'].iloc[-260:].min()
             
@@ -249,17 +247,14 @@ class StockAnalyzer:
             
             score = sum([c1, c2, c3, c4, c5, c6])
             res["score"] = score
-            
             if score == 6: res["status"] = "PERFECT UPTREND (Stage 2)"
             elif score >= 4: res["status"] = "STRONG UPTREND"
             elif score <= 2: res["status"] = "DOWNTREND / BASE"
-                
             if c1 and c2: res["details"].append("MA Alignment (Price > 150 > 200)")
             if c3: res["details"].append("200-Day MA Rising")
             if c5: res["details"].append("> 25% Off Lows (Momentum)")
             if c6: res["details"].append("Near 52-Week Highs (Leader)")
             if not c4: res["details"].append("WARNING: Price below 50 EMA")
-
         except Exception as e: res["details"].append(f"Error: {str(e)}")
         return res
 
@@ -278,19 +273,13 @@ class StockAnalyzer:
         res = {"accuracy": "N/A", "avg_return": 0, "count": 0, "verdict": "Unproven", "best_horizon": 0}
         try:
             if self.data_len < 100: return res
-            
             cond = (self.df['CMF'] > 0.05) & (self.df['MFI'] < 80) & (self.df['Close'] > self.df['VWAP'])
             signals = self.df[cond]
             if len(signals) < 5: return res 
-
             best_win_rate = -1
             best_stats = None
-
             for h in range(1, 41):
-                wins = 0
-                total_return = 0
-                valid_signals = 0
-                
+                wins, total_return, valid_signals = 0, 0, 0
                 indices = signals.index
                 i = 0
                 while i < len(indices):
@@ -298,36 +287,24 @@ class StockAnalyzer:
                     loc = self.df.index.get_loc(idx)
                     if loc > (self.data_len - (h + 1)): 
                         i += 1; continue
-                    
                     entry = self.df['Close'].iloc[loc]
                     future_high = self.df['High'].iloc[loc+1 : loc+h+1].max()
-                    
                     if future_high > (entry * 1.02): wins += 1
-                    
                     exit_price = self.df['Close'].iloc[loc + h]
                     total_return += (exit_price - entry) / entry
-                    
                     valid_signals += 1
                     i += 5
-
                 if valid_signals > 0:
                     wr = (wins / valid_signals) * 100
                     if wr > best_win_rate:
                         best_win_rate = wr
-                        best_stats = {
-                            "accuracy": f"{wr:.1f}%",
-                            "avg_return": f"{(total_return / valid_signals) * 100:.1f}%",
-                            "count": valid_signals,
-                            "best_horizon": h
-                        }
-
+                        best_stats = {"accuracy": f"{wr:.1f}%", "avg_return": f"{(total_return / valid_signals) * 100:.1f}%", "count": valid_signals, "best_horizon": h}
             if best_stats:
                 verdict = "POOR"
                 if best_win_rate > 70: verdict = "HIGHLY PREDICTIVE"
                 elif best_win_rate > 50: verdict = "MODERATE"
                 best_stats["verdict"] = verdict
                 res = best_stats
-
         except Exception: pass
         return res
 
@@ -345,15 +322,11 @@ class StockAnalyzer:
             )
             breakout_indices = self.df.index[signals]
             if len(breakout_indices) < 5: return res
-            
             best_win_rate = -1
             best_stats = None
             numeric_indices = [self.df.index.get_loc(i) for i in breakout_indices]
-            
             for h in range(1, 41): 
-                wins = 0
-                total_return = 0
-                valid_count = 0
+                wins, total_return, valid_count = 0, 0, 0
                 for idx in numeric_indices:
                     if idx > (self.data_len - (h + 1)): continue 
                     entry_price = self.df['Close'].iloc[idx]
@@ -362,23 +335,39 @@ class StockAnalyzer:
                     if ret > 0.02: wins += 1
                     total_return += ret
                     valid_count += 1
-                
                 if valid_count > 0:
                     wr = (wins / valid_count) * 100
                     if wr > best_win_rate:
                         best_win_rate = wr
-                        best_stats = {
-                            "accuracy": f"{wr:.1f}%",
-                            "avg_return_5d": f"{(total_return / valid_count) * 100:.1f}%",
-                            "count": valid_count,
-                            "best_horizon": h
-                        }
-
+                        best_stats = {"accuracy": f"{wr:.1f}%", "avg_return_5d": f"{(total_return / valid_count) * 100:.1f}%", "count": valid_count, "best_horizon": h}
             if best_stats:
                 behavior = "HONEST (Trend Follower)" if best_win_rate > 60 else "FAKEOUT (Fade the Pop)" if best_win_rate < 40 else "MIXED / CHOPPY"
                 best_stats["behavior"] = behavior
                 res = best_stats
+        except Exception: pass
+        return res
 
+    # --- RESTORED: LOW CHEAT BACKTESTER ---
+    def backtest_low_cheat_performance(self):
+        res = {"accuracy": "N/A", "count": 0, "verdict": "Unproven"}
+        try:
+            if self.data_len < 100: return res
+            wins = 0
+            valid_count = 0
+            for i in range(100, self.data_len - 20, 5):
+                slice_df = self.df.iloc[:i]
+                if self._detect_low_cheat_on_slice(slice_df)["detected"]:
+                    valid_count += 1
+                    entry = slice_df['Close'].iloc[-1]
+                    future = self.df.iloc[i : i+10]
+                    max_price = future['High'].max()
+                    min_price = future['Low'].min()
+                    if max_price > (entry * 1.03) and min_price > (entry * 0.98):
+                        wins += 1
+            if valid_count == 0: return res
+            win_rate = (wins / valid_count) * 100
+            verdict = "HIGH PROBABILITY" if win_rate > 65 else "RISKY" if win_rate < 40 else "MODERATE"
+            res = {"accuracy": f"{win_rate:.1f}%", "count": valid_count, "verdict": verdict}
         except Exception: pass
         return res
 
@@ -419,12 +408,8 @@ class StockAnalyzer:
             res['eps'] = eps
             min_cap = self.config["MIN_MARKET_CAP"]
             if mcap == 0: res['status'] = "Unknown (Data Missing)"
-            elif mcap < min_cap:
-                res['status'] = "SMALL CAP (High Risk)"
-                res['warning'] = "Market Cap < 500B IDR. Prone to manipulation."
-            elif eps < 0:
-                res['status'] = "UNPROFITABLE"
-                res['warning'] = "Company has negative Earnings Per Share."
+            elif mcap < min_cap: res['status'] = "SMALL CAP (High Risk)"; res['warning'] = "Market Cap < 500B IDR. Prone to manipulation."
+            elif eps < 0: res['status'] = "UNPROFITABLE"; res['warning'] = "Company has negative Earnings Per Share."
             else: res['status'] = "GOOD"
         except Exception: pass
         return res
@@ -457,6 +442,33 @@ class StockAnalyzer:
             pivots = {"P": p, "R1": r1, "S1": s1}
         except Exception: pass
         return pivots
+
+    # --- HELPER FOR LOW CHEAT BACKTESTING ---
+    def _detect_low_cheat_on_slice(self, df_slice):
+        res = {"detected": False}
+        try:
+            if len(df_slice) < 20: return res
+            c0 = df_slice.iloc[-1]
+            vol_ma = df_slice['Volume'].rolling(20).mean().iloc[-1]
+            atr = df_slice['High'].rolling(14).max() - df_slice['Low'].rolling(14).min()
+            vol_dry = c0['Volume'] < vol_ma * 0.8
+            spread_tight = (c0['High'] - c0['Low']) < (atr / 14) # Approx
+            recent_high = df_slice['High'].iloc[-20:].max()
+            below_pivot = c0['Close'] < recent_high
+            if vol_dry and spread_tight and below_pivot:
+                res = {"detected": True}
+        except: pass
+        return res
+
+    def detect_low_cheat(self):
+        res = {"detected": False, "msg": ""}
+        try:
+            if self.data_len < 20: return res
+            # Use helper to check current state
+            if self._detect_low_cheat_on_slice(self.df)["detected"]:
+                 res = {"detected": True, "msg": "Valid Low Cheat Setup (Tight + Dry Vol)"}
+        except Exception: pass
+        return res
 
     def detect_vcp_pattern(self):
         try:
@@ -577,25 +589,6 @@ class StockAnalyzer:
                 res = {"pattern": "Bullish Engulfing", "sentiment": "Strong Reversal Up"}
         except Exception: pass
         return res
-        
-    def detect_low_cheat(self):
-        """
-        Detects an early entry (Low Cheat) within a VCP.
-        """
-        res = {"detected": False, "msg": ""}
-        try:
-            if self.data_len < 20: return res
-            vcp_check = self.detect_vcp_pattern()
-            if not vcp_check["detected"]: return res
-            c0 = self.df.iloc[-1]
-            vol_dry = c0['Volume'] < c0['VOL_MA'] * 0.8
-            spread_tight = (c0['High'] - c0['Low']) < c0['ATR']
-            recent_high = self.df['High'].iloc[-20:].max()
-            below_pivot = c0['Close'] < recent_high
-            if vol_dry and spread_tight and below_pivot:
-                res = {"detected": True, "msg": "Valid Low Cheat Setup (Tight + Dry Vol)"}
-        except Exception: pass
-        return res
 
     def calculate_probability(self, best_strategy, context, trend_template):
         base_prob = best_strategy.get('win_rate', 50)
@@ -712,6 +705,7 @@ class StockAnalyzer:
             "vol_breakout": self.detect_volume_breakout(),
             "sm_predict": self.backtest_smart_money_predictivity(),
             "breakout_behavior": self.backtest_volume_breakout_behavior(),
+            "lc_stats": self.backtest_low_cheat_performance(), # RE-ADDED
             "low_cheat": self.detect_low_cheat()
         }
 
@@ -781,10 +775,12 @@ class StockAnalyzer:
                 sl_price = self.adjust_to_tick_size(plan['entry'] - (atr * sl_mult))
                 plan['stop_loss'] = sl_price
                 plan['take_profit'] = self.adjust_to_tick_size(plan['entry'] + (atr * tp_mult))
+                
                 risk = plan['entry'] - sl_price
                 if risk > 0:
                     tp_3r = plan['entry'] + (risk * 3.0)
                     plan['take_profit_3r'] = self.adjust_to_tick_size(tp_3r)
+                
                 plan['risk_reward'] = "Projection"
             
         return plan
