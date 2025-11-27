@@ -13,13 +13,13 @@ from datetime import datetime, timedelta
 # ==========================================
 DEFAULT_CONFIG = {
     "BACKTEST_PERIOD": "2y",
-    "MAX_HOLD_DAYS": 60,
+    "MAX_HOLD_DAYS": 60, # 3 Months (Trading Days)
     "FIB_LOOKBACK_DAYS": 120,
     "RSI_PERIOD": 14,
     "RSI_LOWER": 30,
     "ATR_PERIOD": 14,
-    "SL_MULTIPLIER": 2.5,
-    "TP_MULTIPLIER": 5.0,
+    "SL_MULTIPLIER": 2.5, # Default Wider for Swing Safety
+    "TP_MULTIPLIER": 5.0, 
     "CMF_PERIOD": 20,
     "MFI_PERIOD": 14,
     "VOL_MA_PERIOD": 20,
@@ -58,7 +58,6 @@ class StockAnalyzer:
         try:
             period = self.config["BACKTEST_PERIOD"]
             self.df = yf.download(self.ticker, period=period, progress=False, auto_adjust=True)
-            
             try:
                 self.market_df = yf.download(self.market_ticker, period=period, progress=False, auto_adjust=True)
                 if isinstance(self.market_df.columns, pd.MultiIndex):
@@ -66,10 +65,8 @@ class StockAnalyzer:
             except: self.market_df = None
 
             if self.df.empty: return False
-            
             if isinstance(self.df.columns, pd.MultiIndex):
                 self.df.columns = self.df.columns.get_level_values(0)
-            
             self.data_len = len(self.df)
 
             ticker_obj = yf.Ticker(self.ticker)
@@ -190,7 +187,7 @@ class StockAnalyzer:
         k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
         d = k.rolling(window=d_period).mean()
         return k, d
-
+        
     def calc_amihud(self, close, volume, period):
         ret = close.pct_change().abs()
         dol_vol = close * volume
@@ -222,7 +219,6 @@ class StockAnalyzer:
         
         tp = (self.df['High'] + self.df['Low'] + self.df['Close']) / 3
         self.df['VWAP'] = (tp * self.df['Volume']).rolling(20).sum() / self.df['Volume'].rolling(20).sum()
-        
         self.df['AMIHUD'] = self.calc_amihud(self.df['Close'], self.df['Volume'], 20)
 
         atr_p = self.config["ATR_PERIOD"]
@@ -347,7 +343,6 @@ class StockAnalyzer:
                 (self.df['Volume'] > self.df['VOL_MA']) & 
                 (tx_value > min_liq)
             )
-            
             breakout_indices = self.df.index[signals]
             if len(breakout_indices) < 5: return res
             
@@ -359,7 +354,6 @@ class StockAnalyzer:
                 wins = 0
                 total_return = 0
                 valid_count = 0
-                
                 for idx in numeric_indices:
                     if idx > (self.data_len - (h + 1)): continue 
                     entry_price = self.df['Close'].iloc[idx]
@@ -486,7 +480,6 @@ class StockAnalyzer:
             else: return {"detected": False, "msg": "Volatility not contracting."}
         except Exception as e: return {"detected": False, "msg": f"Error: {str(e)}"}
 
-    # --- RE-INSERTED: GEOMETRY & BACKTEST (CRITICAL) ---
     def _detect_geometry_on_slice(self, df_slice):
         result = {"pattern": "None", "msg": ""}
         if len(df_slice) < 60: return result
@@ -584,6 +577,25 @@ class StockAnalyzer:
                 res = {"pattern": "Bullish Engulfing", "sentiment": "Strong Reversal Up"}
         except Exception: pass
         return res
+        
+    def detect_low_cheat(self):
+        """
+        Detects an early entry (Low Cheat) within a VCP.
+        """
+        res = {"detected": False, "msg": ""}
+        try:
+            if self.data_len < 20: return res
+            vcp_check = self.detect_vcp_pattern()
+            if not vcp_check["detected"]: return res
+            c0 = self.df.iloc[-1]
+            vol_dry = c0['Volume'] < c0['VOL_MA'] * 0.8
+            spread_tight = (c0['High'] - c0['Low']) < c0['ATR']
+            recent_high = self.df['High'].iloc[-20:].max()
+            below_pivot = c0['Close'] < recent_high
+            if vol_dry and spread_tight and below_pivot:
+                res = {"detected": True, "msg": "Valid Low Cheat Setup (Tight + Dry Vol)"}
+        except Exception: pass
+        return res
 
     def calculate_probability(self, best_strategy, context, trend_template):
         base_prob = best_strategy.get('win_rate', 50)
@@ -598,6 +610,7 @@ class StockAnalyzer:
         
         if context['vol_breakout']['detected']: prob += 5
         if context['vsa']['detected'] and "Stopping" in context['vsa']['msg']: prob += 5
+        if context['low_cheat']['detected']: prob += 10
         
         if context['vcp']['detected'] or context['geo']['pattern'] != "None": prob += 5
         if "Success" in context['pattern_stats'].get('verdict', ''): prob += 5
@@ -621,6 +634,9 @@ class StockAnalyzer:
         
         if context['vol_breakout']['detected']:
              score += 2; reasons.append("Abnormal Accumulation Day")
+        
+        if context['low_cheat']['detected']:
+             score += 2; reasons.append("Low Cheat Entry")
         
         if "BUYING" in context['smart_money']: score += 1; reasons.append("Smart Money Accumulation")
         
@@ -672,7 +688,6 @@ class StockAnalyzer:
             vol_ma = self.df['VOL_MA'].iloc[-1] if 'VOL_MA' in self.df.columns else 1
             vwap = self.df['VWAP'].iloc[-1]
             
-            # RESTORED AMIHUD LOGIC
             amihud = self.df['AMIHUD'].iloc[-1] if 'AMIHUD' in self.df.columns else 0
             
             if cmf > 0.05 and last_price > vwap: money_flow = "INSTITUTIONAL BUYING"
@@ -696,7 +711,8 @@ class StockAnalyzer:
             "pattern_stats": self.backtest_pattern_reliability(),
             "vol_breakout": self.detect_volume_breakout(),
             "sm_predict": self.backtest_smart_money_predictivity(),
-            "breakout_behavior": self.backtest_volume_breakout_behavior()
+            "breakout_behavior": self.backtest_volume_breakout_behavior(),
+            "low_cheat": self.detect_low_cheat()
         }
 
     def adjust_to_tick_size(self, price):
@@ -707,12 +723,12 @@ class StockAnalyzer:
         else: tick = 25
         return round(price / tick) * tick
 
-    def calculate_trade_plan(self, plan_type, action, current_price, atr, support, resistance, best_strategy, fib_levels, pivots, trend_status):
+    def calculate_trade_plan(self, plan_type, action, current_price, atr, support, resistance, best_strategy, fib_levels, pivots, trend_status, low_cheat):
         plan = {"type": plan_type, "entry": 0, "stop_loss": 0, "take_profit": 0, "risk_reward": "N/A", "status": "ACTIVE"}
         sl_mult = self.config["SL_MULTIPLIER"]
         tp_mult = self.config["TP_MULTIPLIER"]
 
-        if "UPTREND" not in trend_status:
+        if "UPTREND" not in trend_status and not low_cheat['detected']:
              action = "WAIT"
 
         if "BUY" in action:
@@ -733,6 +749,20 @@ class StockAnalyzer:
             
         elif "WAIT" in action:
             plan['status'] = "PENDING (Limit)"
+            
+            if low_cheat['detected']:
+                plan['entry'] = self.adjust_to_tick_size(current_price)
+                plan['status'] = "EARLY ENTRY (Low Cheat)"
+                plan['note'] = "Valid Low Cheat (Tight Stop)"
+                sl_price = self.adjust_to_tick_size(current_price - (atr * 1.5))
+                plan['stop_loss'] = sl_price
+                plan['take_profit'] = self.adjust_to_tick_size(current_price + (atr * tp_mult))
+                risk = current_price - sl_price
+                if risk > 0:
+                     tp_3r = current_price + (risk * 3.0)
+                     plan['take_profit_3r'] = self.adjust_to_tick_size(tp_3r)
+                return plan
+
             strategy_type = best_strategy.get('strategy', 'None')
             target_price = support 
             
@@ -751,12 +781,10 @@ class StockAnalyzer:
                 sl_price = self.adjust_to_tick_size(plan['entry'] - (atr * sl_mult))
                 plan['stop_loss'] = sl_price
                 plan['take_profit'] = self.adjust_to_tick_size(plan['entry'] + (atr * tp_mult))
-                
                 risk = plan['entry'] - sl_price
                 if risk > 0:
                     tp_3r = plan['entry'] + (risk * 3.0)
                     plan['take_profit_3r'] = self.adjust_to_tick_size(tp_3r)
-                
                 plan['risk_reward'] = "Projection"
             
         return plan
@@ -784,7 +812,7 @@ class StockAnalyzer:
         
         prob_data = self.calculate_probability(best_strategy, ctx, trend_template)
 
-        plan = self.calculate_trade_plan("OPTIMIZED_SWING", action, ctx['price'], ctx['atr'], ctx['support'], ctx['resistance'], best_strategy, ctx['fib_levels'], ctx['pivots'], trend_template['status'])
+        plan = self.calculate_trade_plan("OPTIMIZED_SWING", action, ctx['price'], ctx['atr'], ctx['support'], ctx['resistance'], best_strategy, ctx['fib_levels'], ctx['pivots'], trend_template['status'], ctx['low_cheat'])
 
         return {
             "ticker": self.ticker, "name": self.info.get('longName', self.ticker),
