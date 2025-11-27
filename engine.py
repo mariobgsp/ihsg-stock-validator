@@ -181,7 +181,6 @@ class StockAnalyzer:
         return mf_volume.rolling(window=period).sum() / volume.rolling(window=period).sum()
 
     def calc_force_index(self, close, volume, period):
-        """Elder's Force Index"""
         fi = close.diff(1) * volume
         return self.calc_ema(fi, period)
 
@@ -191,9 +190,8 @@ class StockAnalyzer:
         k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
         d = k.rolling(window=d_period).mean()
         return k, d
-        
+
     def calc_amihud(self, close, volume, period):
-        """Amihud Illiquidity Ratio"""
         ret = close.pct_change().abs()
         dol_vol = close * volume
         amihud = (ret / dol_vol) * 1000000000
@@ -220,10 +218,11 @@ class StockAnalyzer:
         self.df['VOL_MA'] = self.df['Volume'].rolling(window=vol_p).mean()
         self.df['RVOL'] = self.df['Volume'] / self.df['VOL_MA']
         
-        # NEW: Restored EFI, VWAP, Amihud
         self.df['EFI'] = self.calc_force_index(self.df['Close'], self.df['Volume'], 13)
+        
         tp = (self.df['High'] + self.df['Low'] + self.df['Close']) / 3
         self.df['VWAP'] = (tp * self.df['Volume']).rolling(20).sum() / self.df['Volume'].rolling(20).sum()
+        
         self.df['AMIHUD'] = self.calc_amihud(self.df['Close'], self.df['Volume'], 20)
 
         atr_p = self.config["ATR_PERIOD"]
@@ -279,7 +278,6 @@ class StockAnalyzer:
         if trade_returns.empty: return 0.0
         return ((trade_returns > 0).sum() / len(trade_returns)) * 100
 
-    # --- OPTIMIZED: ADAPTIVE HORIZON SMART MONEY BACKTEST ---
     def backtest_smart_money_predictivity(self):
         res = {"accuracy": "N/A", "avg_return": 0, "count": 0, "verdict": "Unproven", "best_horizon": 0}
         try:
@@ -292,7 +290,7 @@ class StockAnalyzer:
             best_win_rate = -1
             best_stats = None
 
-            for h in range(1, 41): # Adaptive Loop 1-40 days
+            for h in range(1, 41):
                 wins = 0
                 total_return = 0
                 valid_signals = 0
@@ -306,7 +304,6 @@ class StockAnalyzer:
                         i += 1; continue
                     
                     entry = self.df['Close'].iloc[loc]
-                    # Max excursion logic
                     future_high = self.df['High'].iloc[loc+1 : loc+h+1].max()
                     
                     if future_high > (entry * 1.02): wins += 1
@@ -338,7 +335,6 @@ class StockAnalyzer:
         except Exception: pass
         return res
 
-    # --- OPTIMIZED: ADAPTIVE HORIZON VOLUME BREAKOUT ---
     def backtest_volume_breakout_behavior(self):
         res = {"accuracy": "N/A", "avg_return_5d": 0, "count": 0, "behavior": "Unknown", "best_horizon": 0}
         try:
@@ -429,8 +425,12 @@ class StockAnalyzer:
             res['eps'] = eps
             min_cap = self.config["MIN_MARKET_CAP"]
             if mcap == 0: res['status'] = "Unknown (Data Missing)"
-            elif mcap < min_cap: res['status'] = "SMALL CAP (High Risk)"; res['warning'] = "Market Cap < 500B IDR. Prone to manipulation."
-            elif eps < 0: res['status'] = "UNPROFITABLE"; res['warning'] = "Company has negative Earnings Per Share."
+            elif mcap < min_cap:
+                res['status'] = "SMALL CAP (High Risk)"
+                res['warning'] = "Market Cap < 500B IDR. Prone to manipulation."
+            elif eps < 0:
+                res['status'] = "UNPROFITABLE"
+                res['warning'] = "Company has negative Earnings Per Share."
             else: res['status'] = "GOOD"
         except Exception: pass
         return res
@@ -486,37 +486,30 @@ class StockAnalyzer:
             else: return {"detected": False, "msg": "Volatility not contracting."}
         except Exception as e: return {"detected": False, "msg": f"Error: {str(e)}"}
 
+    # --- RE-INSERTED: GEOMETRY & BACKTEST (CRITICAL) ---
     def _detect_geometry_on_slice(self, df_slice):
         result = {"pattern": "None", "msg": ""}
         if len(df_slice) < 60: return result
-        
         df = df_slice[-60:].copy()
         df['is_peak'] = df['High'] == df['High'].rolling(window=5, center=True).max()
         df['is_trough'] = df['Low'] == df['Low'].rolling(window=5, center=True).min()
         peaks = df[df['is_peak']]
         troughs = df[df['is_trough']]
-        
         if len(peaks) < 2 or len(troughs) < 2: return result
-        
         p2, p1 = peaks['High'].iloc[-1], peaks['High'].iloc[-2]
         t2, t1 = troughs['Low'].iloc[-1], troughs['Low'].iloc[-2]
-        
         p2_idx, p1_idx = df.index.get_loc(peaks.index[-1]), df.index.get_loc(peaks.index[-2])
         t2_idx, t1_idx = df.index.get_loc(troughs.index[-1]), df.index.get_loc(troughs.index[-2])
-
         m_res = (p2 - p1) / (p2_idx - p1_idx) if (p2_idx - p1_idx) != 0 else 0
         m_sup = (t2 - t1) / (t2_idx - t1_idx) if (t2_idx - t1_idx) != 0 else 0
-        
         if m_res < -0.01 and m_sup > 0.01: result["pattern"] = "Symmetrical Triangle"
         elif abs(m_res) < 0.01 and m_sup > 0.01: result["pattern"] = "Ascending Triangle"
         elif m_res < -0.01 and abs(m_sup) < 0.01: result["pattern"] = "Descending Triangle"
-        
         c_res = p1 - (m_res * p1_idx)
         c_sup = t1 - (m_sup * t1_idx)
         apex_x = 0
         if (m_res - m_sup) != 0: apex_x = (c_sup - c_res) / (m_res - m_sup)
         result["apex_dist"] = apex_x - (len(df) - 1)
-        
         return result
 
     def detect_geometric_patterns(self):
@@ -525,6 +518,24 @@ class StockAnalyzer:
             if "apex_dist" in res and 0 < res["apex_dist"] < 30:
                 res["msg"] += f" Apex in ~{int(res['apex_dist'])} days."
         return res
+
+    def backtest_pattern_reliability(self):
+        if self.data_len < 200: return {"accuracy": "N/A", "count": 0}
+        wins = 0
+        total_patterns = 0
+        for i in range(100, self.data_len - 20, 5):
+            slice_df = self.df.iloc[:i]
+            res = self._detect_geometry_on_slice(slice_df)
+            if res["pattern"] != "None":
+                total_patterns += 1
+                future_window = self.df.iloc[i : i+20]
+                entry_price = slice_df['Close'].iloc[-1]
+                max_price = future_window['High'].max()
+                if max_price > (entry_price * 1.03): wins += 1
+        if total_patterns == 0: return {"accuracy": "N/A", "count": 0}
+        win_rate = (wins / total_patterns) * 100
+        verdict = "Likely Success" if win_rate > 60 else "Likely Fail" if win_rate < 40 else "Coin Flip"
+        return { "accuracy": f"{win_rate:.1f}%", "count": total_patterns, "verdict": verdict, "wins": wins }
 
     def detect_volume_breakout(self):
         res = {"detected": False, "msg": ""}
@@ -660,6 +671,8 @@ class StockAnalyzer:
             vol = self.df['Volume'].iloc[-1]
             vol_ma = self.df['VOL_MA'].iloc[-1] if 'VOL_MA' in self.df.columns else 1
             vwap = self.df['VWAP'].iloc[-1]
+            
+            # RESTORED AMIHUD LOGIC
             amihud = self.df['AMIHUD'].iloc[-1] if 'AMIHUD' in self.df.columns else 0
             
             if cmf > 0.05 and last_price > vwap: money_flow = "INSTITUTIONAL BUYING"
@@ -667,7 +680,6 @@ class StockAnalyzer:
             else: money_flow = "RETAIL NOISE / Indecision"
             if vol > (2.0 * vol_ma): money_flow += " [HIGH VOLUME]"
             
-            # Amihud Check (Stealth)
             if amihud < 0.0000001 and money_flow == "RETAIL NOISE / Indecision":
                  money_flow += " (Liquid / Stealth)"
 
