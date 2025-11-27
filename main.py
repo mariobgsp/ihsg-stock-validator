@@ -102,6 +102,11 @@ def print_report(data):
     if sm_stats.get('count', 0) > 0:
         print(f"    ↳ Smart Money Accuracy: {sm_stats['accuracy']} (Avg Return {sm_stats['avg_return']})")
     
+    # Low Cheat Backtest Stats
+    lc_stats = ctx.get('lc_stats', {})
+    if lc_stats.get('count', 0) > 0:
+        print(f"    ↳ Low Cheat Accuracy: {lc_stats['accuracy']} ({lc_stats['verdict']})")
+
     vsa = ctx.get('vsa', {})
     if vsa.get('detected'):
         print(f"VSA Signal:  {vsa['msg']}")
