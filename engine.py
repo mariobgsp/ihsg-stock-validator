@@ -58,6 +58,7 @@ class StockAnalyzer:
         try:
             period = self.config["BACKTEST_PERIOD"]
             self.df = yf.download(self.ticker, period=period, progress=False, auto_adjust=True)
+            
             try:
                 self.market_df = yf.download(self.market_ticker, period=period, progress=False, auto_adjust=True)
                 if isinstance(self.market_df.columns, pd.MultiIndex):
@@ -65,8 +66,10 @@ class StockAnalyzer:
             except: self.market_df = None
 
             if self.df.empty: return False
+            
             if isinstance(self.df.columns, pd.MultiIndex):
                 self.df.columns = self.df.columns.get_level_values(0)
+            
             self.data_len = len(self.df)
 
             ticker_obj = yf.Ticker(self.ticker)
@@ -177,6 +180,11 @@ class StockAnalyzer:
         mf_volume = mf_multiplier * volume
         return mf_volume.rolling(window=period).sum() / volume.rolling(window=period).sum()
 
+    def calc_force_index(self, close, volume, period):
+        """Elder's Force Index"""
+        fi = close.diff(1) * volume
+        return self.calc_ema(fi, period)
+
     def calc_stoch(self, high, low, close, k_period, d_period):
         lowest_low = low.rolling(window=k_period).min()
         highest_high = high.rolling(window=k_period).max()
@@ -184,15 +192,10 @@ class StockAnalyzer:
         d = k.rolling(window=d_period).mean()
         return k, d
         
-    # --- NEW: AMIHUD ILLIQUIDITY ---
     def calc_amihud(self, close, volume, period):
-        """
-        Amihud Illiquidity = |Return| / (Price * Volume)
-        Measures Price Impact. Lower is better (Liquid).
-        """
+        """Amihud Illiquidity Ratio"""
         ret = close.pct_change().abs()
         dol_vol = close * volume
-        # Multiply by 10^9 to make numbers readable for IDR
         amihud = (ret / dol_vol) * 1000000000
         return amihud.rolling(window=period).mean()
 
@@ -217,11 +220,10 @@ class StockAnalyzer:
         self.df['VOL_MA'] = self.df['Volume'].rolling(window=vol_p).mean()
         self.df['RVOL'] = self.df['Volume'] / self.df['VOL_MA']
         
-        # Rolling VWAP
+        # NEW: Restored EFI, VWAP, Amihud
+        self.df['EFI'] = self.calc_force_index(self.df['Close'], self.df['Volume'], 13)
         tp = (self.df['High'] + self.df['Low'] + self.df['Close']) / 3
         self.df['VWAP'] = (tp * self.df['Volume']).rolling(20).sum() / self.df['Volume'].rolling(20).sum()
-
-        # NEW: Amihud Calculation
         self.df['AMIHUD'] = self.calc_amihud(self.df['Close'], self.df['Volume'], 20)
 
         atr_p = self.config["ATR_PERIOD"]
@@ -277,6 +279,119 @@ class StockAnalyzer:
         if trade_returns.empty: return 0.0
         return ((trade_returns > 0).sum() / len(trade_returns)) * 100
 
+    # --- OPTIMIZED: ADAPTIVE HORIZON SMART MONEY BACKTEST ---
+    def backtest_smart_money_predictivity(self):
+        res = {"accuracy": "N/A", "avg_return": 0, "count": 0, "verdict": "Unproven", "best_horizon": 0}
+        try:
+            if self.data_len < 100: return res
+            
+            cond = (self.df['CMF'] > 0.05) & (self.df['MFI'] < 80) & (self.df['Close'] > self.df['VWAP'])
+            signals = self.df[cond]
+            if len(signals) < 5: return res 
+
+            best_win_rate = -1
+            best_stats = None
+
+            for h in range(1, 41): # Adaptive Loop 1-40 days
+                wins = 0
+                total_return = 0
+                valid_signals = 0
+                
+                indices = signals.index
+                i = 0
+                while i < len(indices):
+                    idx = indices[i]
+                    loc = self.df.index.get_loc(idx)
+                    if loc > (self.data_len - (h + 1)): 
+                        i += 1; continue
+                    
+                    entry = self.df['Close'].iloc[loc]
+                    # Max excursion logic
+                    future_high = self.df['High'].iloc[loc+1 : loc+h+1].max()
+                    
+                    if future_high > (entry * 1.02): wins += 1
+                    
+                    exit_price = self.df['Close'].iloc[loc + h]
+                    total_return += (exit_price - entry) / entry
+                    
+                    valid_signals += 1
+                    i += 5
+
+                if valid_signals > 0:
+                    wr = (wins / valid_signals) * 100
+                    if wr > best_win_rate:
+                        best_win_rate = wr
+                        best_stats = {
+                            "accuracy": f"{wr:.1f}%",
+                            "avg_return": f"{(total_return / valid_signals) * 100:.1f}%",
+                            "count": valid_signals,
+                            "best_horizon": h
+                        }
+
+            if best_stats:
+                verdict = "POOR"
+                if best_win_rate > 70: verdict = "HIGHLY PREDICTIVE"
+                elif best_win_rate > 50: verdict = "MODERATE"
+                best_stats["verdict"] = verdict
+                res = best_stats
+
+        except Exception: pass
+        return res
+
+    # --- OPTIMIZED: ADAPTIVE HORIZON VOLUME BREAKOUT ---
+    def backtest_volume_breakout_behavior(self):
+        res = {"accuracy": "N/A", "avg_return_5d": 0, "count": 0, "behavior": "Unknown", "best_horizon": 0}
+        try:
+            if self.data_len < 100: return res
+            min_liq = self.config["MIN_DAILY_VOL"]
+            tx_value = self.df['Close'] * self.df['Volume']
+            signals = (
+                (self.df['Close'] > self.df['Open']) & 
+                (self.df['Close'] > self.df['Close'].shift(1)) & 
+                (self.df['Volume'] > self.df['VOL_MA']) & 
+                (tx_value > min_liq)
+            )
+            
+            breakout_indices = self.df.index[signals]
+            if len(breakout_indices) < 5: return res
+            
+            best_win_rate = -1
+            best_stats = None
+            numeric_indices = [self.df.index.get_loc(i) for i in breakout_indices]
+            
+            for h in range(1, 41): 
+                wins = 0
+                total_return = 0
+                valid_count = 0
+                
+                for idx in numeric_indices:
+                    if idx > (self.data_len - (h + 1)): continue 
+                    entry_price = self.df['Close'].iloc[idx]
+                    future_price = self.df['Close'].iloc[idx + h]
+                    ret = (future_price - entry_price) / entry_price
+                    if ret > 0.02: wins += 1
+                    total_return += ret
+                    valid_count += 1
+                
+                if valid_count > 0:
+                    wr = (wins / valid_count) * 100
+                    if wr > best_win_rate:
+                        best_win_rate = wr
+                        best_stats = {
+                            "accuracy": f"{wr:.1f}%",
+                            "avg_return_5d": f"{(total_return / valid_count) * 100:.1f}%",
+                            "count": valid_count,
+                            "best_horizon": h
+                        }
+
+            if best_stats:
+                behavior = "HONEST (Trend Follower)" if best_win_rate > 60 else "FAKEOUT (Fade the Pop)" if best_win_rate < 40 else "MIXED / CHOPPY"
+                best_stats["behavior"] = behavior
+                res = best_stats
+
+        except Exception: pass
+        return res
+
     def optimize_stock(self, days_min, days_max):
         best_res = {"strategy": None, "win_rate": -1, "details": "N/A", "hold_days": 0, "is_triggered_today": False}
         rsi_levels = [self.config["RSI_LOWER"], self.config["RSI_LOWER"] + 10]
@@ -314,12 +429,8 @@ class StockAnalyzer:
             res['eps'] = eps
             min_cap = self.config["MIN_MARKET_CAP"]
             if mcap == 0: res['status'] = "Unknown (Data Missing)"
-            elif mcap < min_cap:
-                res['status'] = "SMALL CAP (High Risk)"
-                res['warning'] = "Market Cap < 500B IDR. Prone to manipulation."
-            elif eps < 0:
-                res['status'] = "UNPROFITABLE"
-                res['warning'] = "Company has negative Earnings Per Share."
+            elif mcap < min_cap: res['status'] = "SMALL CAP (High Risk)"; res['warning'] = "Market Cap < 500B IDR. Prone to manipulation."
+            elif eps < 0: res['status'] = "UNPROFITABLE"; res['warning'] = "Company has negative Earnings Per Share."
             else: res['status'] = "GOOD"
         except Exception: pass
         return res
@@ -362,22 +473,17 @@ class StockAnalyzer:
             recent_df['is_trough'] = recent_df['Low'] == recent_df['Low'].rolling(window=5, center=True).min()
             troughs = recent_df[recent_df['is_trough']]
             if len(peaks) < 2 or len(troughs) < 2: return {"detected": False, "msg": "No clear Swing Pattern"}
-            
             last_peak_price = peaks['High'].iloc[-1]
             prev_peak_price = peaks['High'].iloc[-2]
             last_trough_price = troughs['Low'].iloc[-1]
             prev_trough_price = troughs['Low'].iloc[-2]
-            
             depth_1 = (prev_peak_price - prev_trough_price) / prev_peak_price
             depth_2 = (last_peak_price - last_trough_price) / last_peak_price
             is_contracting = depth_2 < (depth_1 * 0.9)
             current_price = self.df['Close'].iloc[-1]
             near_breakout = current_price >= (last_peak_price * 0.95)
-            
-            if is_contracting and near_breakout:
-                return {"detected": True, "msg": f"Contraction from {depth_1*100:.1f}% to {depth_2*100:.1f}%."}
-            else:
-                return {"detected": False, "msg": "Volatility not contracting."}
+            if is_contracting and near_breakout: return {"detected": True, "msg": f"Contraction from {depth_1*100:.1f}% to {depth_2*100:.1f}%."}
+            else: return {"detected": False, "msg": "Volatility not contracting."}
         except Exception as e: return {"detected": False, "msg": f"Error: {str(e)}"}
 
     def _detect_geometry_on_slice(self, df_slice):
@@ -420,89 +526,6 @@ class StockAnalyzer:
                 res["msg"] += f" Apex in ~{int(res['apex_dist'])} days."
         return res
 
-    def backtest_pattern_reliability(self):
-        if self.data_len < 200: return {"accuracy": "N/A", "count": 0}
-        wins = 0
-        total_patterns = 0
-        
-        for i in range(100, self.data_len - 20, 5):
-            slice_df = self.df.iloc[:i]
-            res = self._detect_geometry_on_slice(slice_df)
-            if res["pattern"] != "None":
-                total_patterns += 1
-                future_window = self.df.iloc[i : i+20]
-                entry_price = slice_df['Close'].iloc[-1]
-                max_price = future_window['High'].max()
-                if max_price > (entry_price * 1.03): wins += 1
-        
-        if total_patterns == 0: return {"accuracy": "N/A", "count": 0}
-        win_rate = (wins / total_patterns) * 100
-        verdict = "Likely Success" if win_rate > 60 else "Likely Fail" if win_rate < 40 else "Coin Flip"
-        return { "accuracy": f"{win_rate:.1f}%", "count": total_patterns, "verdict": verdict, "wins": wins }
-
-    # --- SMART MONEY & BREAKOUT ---
-    def backtest_smart_money_predictivity(self):
-        res = {"accuracy": "N/A", "avg_return": 0, "count": 0, "verdict": "Unproven"}
-        try:
-            if self.data_len < 100: return res
-            cond = (self.df['CMF'] > 0.05) & (self.df['MFI'] < 80) & (self.df['Close'] > self.df['VWAP'])
-            signals = self.df[cond]
-            if len(signals) < 5: return res
-            wins, total_return, valid_signals = 0, 0, 0
-            indices = signals.index
-            i = 0
-            while i < len(indices):
-                idx = indices[i]
-                loc = self.df.index.get_loc(idx)
-                if loc > (self.data_len - 15): 
-                    i += 1; continue
-                entry = self.df['Close'].iloc[loc]
-                future_price = self.df['Close'].iloc[loc + 10]
-                ret = (future_price - entry) / entry
-                if ret > 0: wins += 1
-                total_return += ret
-                valid_signals += 1
-                i += 5
-            if valid_signals == 0: return res
-            win_rate = (wins / valid_signals) * 100
-            avg_ret = (total_return / valid_signals) * 100
-            verdict = "HIGHLY PREDICTIVE" if win_rate > 65 else "MODERATELY PREDICTIVE" if win_rate > 50 else "POOR PREDICTOR"
-            res = {"accuracy": f"{win_rate:.1f}%", "avg_return": f"{avg_ret:.1f}%", "count": valid_signals, "verdict": verdict}
-        except Exception: pass
-        return res
-
-    def backtest_volume_breakout_behavior(self):
-        res = {"accuracy": "N/A", "avg_return_5d": 0, "count": 0, "behavior": "Unknown"}
-        try:
-            if self.data_len < 100: return res
-            min_liq = self.config["MIN_DAILY_VOL"]
-            tx_value = self.df['Close'] * self.df['Volume']
-            signals = (
-                (self.df['Close'] > self.df['Open']) & 
-                (self.df['Close'] > self.df['Close'].shift(1)) & 
-                (self.df['Volume'] > self.df['VOL_MA']) & 
-                (tx_value > min_liq)
-            )
-            breakout_indices = self.df.index[signals]
-            if len(breakout_indices) < 5: return res
-            wins, total_return, valid_count = 0, 0, 0
-            numeric_indices = [self.df.index.get_loc(i) for i in breakout_indices]
-            for idx in numeric_indices:
-                if idx > (self.data_len - 6): continue 
-                entry_price = self.df['Close'].iloc[idx]
-                future_price = self.df['Close'].iloc[idx + 5]
-                ret = (future_price - entry_price) / entry_price
-                if ret > 0.02: wins += 1
-                total_return += ret
-                valid_count += 1
-            if valid_count == 0: return res
-            win_rate = (wins / valid_count) * 100
-            avg_ret_pct = (total_return / valid_count) * 100
-            behavior = "HONEST (Trend Follower)" if win_rate > 60 else "FAKEOUT (Fade the Pop)" if win_rate < 40 else "MIXED / CHOPPY"
-            res = {"accuracy": f"{win_rate:.1f}%", "avg_return_5d": f"{avg_ret_pct:.1f}%", "count": valid_count, "behavior": behavior}
-        except Exception: pass
-        return res
-
     def detect_volume_breakout(self):
         res = {"detected": False, "msg": ""}
         try:
@@ -519,7 +542,7 @@ class StockAnalyzer:
                 res = {"detected": True, "msg": "High Volume Accumulation Day"}
         except Exception: pass
         return res
-
+    
     def detect_vsa_anomalies(self):
         res = {"detected": False, "msg": ""}
         try:
@@ -637,28 +660,28 @@ class StockAnalyzer:
             vol = self.df['Volume'].iloc[-1]
             vol_ma = self.df['VOL_MA'].iloc[-1] if 'VOL_MA' in self.df.columns else 1
             vwap = self.df['VWAP'].iloc[-1]
+            amihud = self.df['AMIHUD'].iloc[-1] if 'AMIHUD' in self.df.columns else 0
             
             if cmf > 0.05 and last_price > vwap: money_flow = "INSTITUTIONAL BUYING"
             elif cmf < -0.05 or last_price < vwap: money_flow = "INSTITUTIONAL SELLING"
             else: money_flow = "RETAIL NOISE / Indecision"
             if vol > (2.0 * vol_ma): money_flow += " [HIGH VOLUME]"
-        
-        geo_status = self.detect_geometric_patterns()
-        pattern_stats = {}
-        if geo_status["pattern"] != "None":
-            pattern_stats = self.backtest_pattern_reliability()
+            
+            # Amihud Check (Stealth)
+            if amihud < 0.0000001 and money_flow == "RETAIL NOISE / Indecision":
+                 money_flow += " (Liquid / Stealth)"
 
         return {
             "price": last_price, "support": support, "resistance": resistance,
             "dist_support": dist_supp, "fib_levels": fibs, "trend": trend,
             "atr": atr, "obv_status": obv_status, "smart_money": money_flow,
-            "vcp": self.detect_vcp_pattern(), "geo": geo_status,
+            "vcp": self.detect_vcp_pattern(), "geo": self.detect_geometric_patterns(),
             "candle": self.detect_candle_patterns(), "vsa": self.detect_vsa_anomalies(),
             "efi": self.df['EFI'].iloc[-1] if 'EFI' in self.df.columns else 0,
             "fundamental": self.check_fundamentals(),
             "squeeze": self.detect_ttm_squeeze(),
             "pivots": self.calculate_pivot_points(),
-            "pattern_stats": pattern_stats,
+            "pattern_stats": self.backtest_pattern_reliability(),
             "vol_breakout": self.detect_volume_breakout(),
             "sm_predict": self.backtest_smart_money_predictivity(),
             "breakout_behavior": self.backtest_volume_breakout_behavior()
