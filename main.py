@@ -77,6 +77,9 @@ def print_report(data):
     
     sqz = ctx.get('squeeze', {})
     if sqz.get('detected'): print(f"[!!!] {sqz['msg']}")
+    
+    vol_brk = ctx.get('vol_breakout', {})
+    if vol_brk.get('detected'): print(f"[!!!] {vol_brk['msg']}")
 
     vcp = ctx.get('vcp', {})
     if vcp.get('detected'): print(f"[+] {vcp['msg']}")
@@ -86,7 +89,6 @@ def print_report(data):
         print(f"[+] GEO: {geo['pattern']}")
         print(f"    {geo['msg']}")
         
-        # NEW: Empirical Pattern Backtest Result
         p_stats = ctx.get('pattern_stats', {})
         if p_stats.get('count', 0) > 0:
             print(f"    ↳ Historical Reliability: {p_stats['accuracy']} ({p_stats['wins']}/{p_stats['count']} Wins)")
@@ -133,6 +135,9 @@ def main():
     parser.add_argument('--fib', type=int, default=DEFAULT_CONFIG['FIB_LOOKBACK_DAYS'])
     parser.add_argument('--cmf', type=int, default=DEFAULT_CONFIG['CMF_PERIOD'])
     parser.add_argument('--mfi', type=int, default=DEFAULT_CONFIG['MFI_PERIOD'])
+    
+    # NEW: Minimum Volume Value (Liquidity)
+    parser.add_argument('--min_vol', type=int, default=DEFAULT_CONFIG['MIN_DAILY_VOL'], help='Min Daily Transaction Value (IDR)')
 
     args = parser.parse_args()
 
@@ -147,7 +152,8 @@ def main():
         "TP_MULTIPLIER": args.tp,
         "FIB_LOOKBACK_DAYS": args.fib,
         "CMF_PERIOD": args.cmf,
-        "MFI_PERIOD": args.mfi
+        "MFI_PERIOD": args.mfi,
+        "MIN_DAILY_VOL": args.min_vol # Passed to Engine
     }
 
     print(f"\nAnalyzing {args.ticker.upper()}... (Config: {user_config})")
