@@ -127,9 +127,7 @@ class StockAnalyzer:
         except Exception as e:
             self.news_analysis = {"sentiment": "Error", "score": 0, "headlines": [str(e)]}
 
-    # ==========================================
-    # 3. MATH HELPERS (No Dependencies)
-    # ==========================================
+    # --- MATH HELPERS ---
     def calc_rsi(self, series, period):
         delta = series.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -199,8 +197,10 @@ class StockAnalyzer:
     def prepare_indicators(self):
         if self.df is None or self.df.empty: return
 
+        # Calculate all key MAs for backtesting
         self.df['EMA_20'] = self.calc_ema(self.df['Close'], 20)
         self.df['EMA_50'] = self.calc_ema(self.df['Close'], 50)
+        self.df['EMA_100'] = self.calc_ema(self.df['Close'], 100) # Added
         self.df['EMA_150'] = self.calc_ema(self.df['Close'], 150)
         self.df['EMA_200'] = self.calc_ema(self.df['Close'], 200)
         self.active_trend_col = 'EMA_200'
@@ -226,9 +226,6 @@ class StockAnalyzer:
         atr_p = self.config["ATR_PERIOD"]
         self.df['ATR'] = self.calc_atr(self.df['High'], self.df['Low'], self.df['Close'], atr_p)
 
-    # ==========================================
-    # 4. DETECTION MODULES (The Sensors)
-    # ==========================================
     def check_trend_template(self):
         res = {"status": "FAIL", "score": 0, "details": []}
         try:
@@ -263,6 +260,250 @@ class StockAnalyzer:
             if not c4: res["details"].append("WARNING: Price below 50 EMA")
         except Exception as e: res["details"].append(f"Error: {str(e)}")
         return res
+
+    def run_backtest_simulation(self, condition_series, hold_days):
+        if condition_series is None: return 0.0 
+        signals = self.df[condition_series].copy()
+        if signals.empty: return 0.0
+        future_close = self.df['Close'].shift(-hold_days)
+        current_close = self.df['Close']
+        returns = (future_close - current_close) / current_close
+        trade_returns = returns[condition_series].dropna()
+        if trade_returns.empty: return 0.0
+        return ((trade_returns > 0).sum() / len(trade_returns)) * 100
+
+    def backtest_smart_money_predictivity(self):
+        res = {"accuracy": "N/A", "avg_return": 0, "count": 0, "verdict": "Unproven", "best_horizon": 0}
+        try:
+            if self.data_len < 100: return res
+            cond = (self.df['CMF'] > 0.05) & (self.df['MFI'] < 80) & (self.df['Close'] > self.df['VWAP'])
+            signals = self.df[cond]
+            if len(signals) < 5: return res 
+            best_win_rate = -1
+            best_stats = None
+            for h in range(1, 41):
+                wins, total_return, valid_signals = 0, 0, 0
+                indices = signals.index
+                i = 0
+                while i < len(indices):
+                    idx = indices[i]
+                    loc = self.df.index.get_loc(idx)
+                    if loc > (self.data_len - (h + 1)): 
+                        i += 1; continue
+                    entry = self.df['Close'].iloc[loc]
+                    future_high = self.df['High'].iloc[loc+1 : loc+h+1].max()
+                    if future_high > (entry * 1.02): wins += 1
+                    exit_price = self.df['Close'].iloc[loc + h]
+                    total_return += (exit_price - entry) / entry
+                    valid_signals += 1
+                    i += 5
+                if valid_signals > 0:
+                    wr = (wins / valid_signals) * 100
+                    if wr > best_win_rate:
+                        best_win_rate = wr
+                        best_stats = {"accuracy": f"{wr:.1f}%", "avg_return": f"{(total_return / valid_signals) * 100:.1f}%", "count": valid_signals, "best_horizon": h}
+            if best_stats:
+                verdict = "POOR"
+                if best_win_rate > 70: verdict = "HIGHLY PREDICTIVE"
+                elif best_win_rate > 50: verdict = "MODERATE"
+                best_stats["verdict"] = verdict
+                res = best_stats
+        except Exception: pass
+        return res
+
+    def backtest_volume_breakout_behavior(self):
+        res = {"accuracy": "N/A", "avg_return_5d": 0, "count": 0, "behavior": "Unknown", "best_horizon": 0}
+        try:
+            if self.data_len < 100: return res
+            min_liq = self.config["MIN_DAILY_VOL"]
+            tx_value = self.df['Close'] * self.df['Volume']
+            signals = ((self.df['Close'] > self.df['Open']) & (self.df['Close'] > self.df['Close'].shift(1)) & (self.df['Volume'] > self.df['VOL_MA']) & (tx_value > min_liq))
+            breakout_indices = self.df.index[signals]
+            if len(breakout_indices) < 5: return res
+            best_win_rate = -1
+            best_stats = None
+            numeric_indices = [self.df.index.get_loc(i) for i in breakout_indices]
+            for h in range(1, 41): 
+                wins, total_return, valid_count = 0, 0, 0
+                for idx in numeric_indices:
+                    if idx > (self.data_len - (h + 1)): continue 
+                    entry_price = self.df['Close'].iloc[idx]
+                    future_price = self.df['Close'].iloc[idx + h]
+                    ret = (future_price - entry_price) / entry_price
+                    if ret > 0.02: wins += 1
+                    total_return += ret
+                    valid_count += 1
+                if valid_count > 0:
+                    wr = (wins / valid_count) * 100
+                    if wr > best_win_rate:
+                        best_win_rate = wr
+                        best_stats = {"accuracy": f"{wr:.1f}%", "avg_return_5d": f"{(total_return / valid_count) * 100:.1f}%", "count": valid_count, "best_horizon": h}
+            if best_stats:
+                behavior = "HONEST (Trend Follower)" if best_win_rate > 60 else "FAKEOUT (Fade the Pop)" if best_win_rate < 40 else "MIXED / CHOPPY"
+                best_stats["behavior"] = behavior
+                res = best_stats
+        except Exception: pass
+        return res
+
+    def _detect_low_cheat_on_slice(self, df_slice):
+        res = {"detected": False}
+        try:
+            if len(df_slice) < 20: return res
+            c0 = df_slice.iloc[-1]
+            vol_ma = df_slice['Volume'].rolling(20).mean().iloc[-1]
+            atr = df_slice['High'].rolling(14).max() - df_slice['Low'].rolling(14).min()
+            vol_dry = c0['Volume'] < vol_ma * 0.8
+            spread_tight = (c0['High'] - c0['Low']) < (atr / 14)
+            recent_high = df_slice['High'].iloc[-20:].max()
+            below_pivot = c0['Close'] < recent_high
+            if vol_dry and spread_tight and below_pivot:
+                res = {"detected": True}
+        except: pass
+        return res
+
+    def detect_low_cheat(self):
+        res = {"detected": False, "msg": ""}
+        try:
+            if self.data_len < 20: return res
+            if self._detect_low_cheat_on_slice(self.df)["detected"]:
+                 res = {"detected": True, "msg": "Valid Low Cheat Setup (Tight + Dry Vol)"}
+        except Exception: pass
+        return res
+
+    def backtest_low_cheat_performance(self):
+        res = {"accuracy": "N/A", "count": 0, "verdict": "Unproven"}
+        try:
+            if self.data_len < 100: return res
+            wins = 0
+            valid_count = 0
+            for i in range(100, self.data_len - 20, 5):
+                slice_df = self.df.iloc[:i]
+                if self._detect_low_cheat_on_slice(slice_df)["detected"]:
+                    valid_count += 1
+                    entry = slice_df['Close'].iloc[-1]
+                    future = self.df.iloc[i : i+10]
+                    max_price = future['High'].max()
+                    min_price = future['Low'].min()
+                    if max_price > (entry * 1.03) and min_price > (entry * 0.98):
+                        wins += 1
+            if valid_count == 0: return res
+            win_rate = (wins / valid_count) * 100
+            verdict = "HIGH PROBABILITY" if win_rate > 65 else "RISKY" if win_rate < 40 else "MODERATE"
+            res = {"accuracy": f"{win_rate:.1f}%", "count": valid_count, "verdict": verdict}
+        except Exception: pass
+        return res
+
+    def backtest_fib_bounce(self):
+        res = {"accuracy": "N/A", "count": 0, "verdict": "Unproven"}
+        try:
+            if self.data_len < 200: return res
+            wins = 0
+            count = 0
+            lookback = self.config["FIB_LOOKBACK_DAYS"]
+            for i in range(lookback + 20, self.data_len - 20, 10):
+                past_df = self.df.iloc[i-lookback:i]
+                future_df = self.df.iloc[i:i+15]
+                sh = past_df['High'].max()
+                sl = past_df['Low'].min()
+                rng = sh - sl
+                fib_618 = sh - (0.618 * rng)
+                current_low = self.df['Low'].iloc[i]
+                if abs(current_low - fib_618) / fib_618 < 0.02:
+                    count += 1
+                    if future_df['High'].max() > (current_low * 1.05):
+                        wins += 1
+            if count == 0: return res
+            win_rate = (wins / count) * 100
+            verdict = "GOLDEN ZONE" if win_rate > 65 else "WEAK SUPPORT" if win_rate < 40 else "NEUTRAL"
+            res = {"accuracy": f"{win_rate:.1f}%", "count": count, "verdict": verdict}
+        except Exception: pass
+        return res
+
+    # --- UPDATED: MULTI-MA SUPPORT BACKTESTER ---
+    def backtest_ma_support_all(self):
+        """
+        Backtests 20, 50, 100, 200 EMA bounces. Returns best performer.
+        """
+        res = {"best_ma": "None", "accuracy": "N/A", "count": 0, "verdict": "Unknown", "details": {}}
+        try:
+            if self.data_len < 200: return res
+            
+            best_win_rate = -1
+            
+            periods = [20, 50, 100, 200]
+            
+            for p in periods:
+                ma_col = f'EMA_{p}'
+                if ma_col not in self.df.columns: continue
+                
+                # Logic: Low touches MA, but trend (slope) is positive
+                # Using Slope for trend context instead of just price > MA
+                slope = self.df[ma_col].diff(5) > 0
+                touched_ma = (self.df['Low'] <= self.df[ma_col]) & (self.df['High'] >= self.df[ma_col])
+                
+                signals = touched_ma & slope
+                indices = self.df.index[signals]
+                numeric_indices = [self.df.index.get_loc(i) for i in indices]
+                
+                if len(numeric_indices) < 3: continue
+
+                wins = 0
+                valid_count = 0
+                
+                for idx in numeric_indices:
+                    if idx > (self.data_len - 10): continue # Skip very recent
+                    # Skip overlapping signals (don't count every day of a touch)
+                    if valid_count > 0 and idx - numeric_indices[valid_count-1] < 5: continue
+                    
+                    entry = self.df[ma_col].iloc[idx]
+                    future_high = self.df['High'].iloc[idx+1 : idx+10].max() # Check next 10 days
+                    
+                    if future_high > (entry * 1.03): # >3% bounce
+                        wins += 1
+                    valid_count += 1
+                
+                if valid_count > 0:
+                    wr = (wins / valid_count) * 100
+                    res["details"][f"EMA{p}"] = f"{wr:.0f}% ({wins}/{valid_count})"
+                    
+                    if wr > best_win_rate:
+                        best_win_rate = wr
+                        verdict = "STRONG SUPPORT" if wr > 65 else "WEAK SUPPORT" if wr < 40 else "MODERATE"
+                        res["best_ma"] = f"EMA {p}"
+                        res["accuracy"] = f"{wr:.1f}%"
+                        res["count"] = valid_count
+                        res["verdict"] = verdict
+                        
+        except Exception: pass
+        return res
+
+    def optimize_stock(self, days_min, days_max):
+        best_res = {"strategy": None, "win_rate": -1, "details": "N/A", "hold_days": 0, "is_triggered_today": False}
+        rsi_levels = [self.config["RSI_LOWER"], self.config["RSI_LOWER"] + 10]
+
+        if 'RSI' in self.df.columns:
+            for level in rsi_levels:
+                condition = self.df['RSI'] < level
+                for days in range(days_min, days_max + 1):
+                    wr = self.run_backtest_simulation(condition, days)
+                    if wr > best_res['win_rate']:
+                        best_res = {"strategy": "RSI Reversal", "details": f"RSI < {level}", "win_rate": wr, "hold_days": days, "is_triggered_today": self.df['RSI'].iloc[-1] < level}
+
+        if 'EMA_50' in self.df.columns and self.df['EMA_50'].iloc[-1] > self.df['EMA_200'].iloc[-1]:
+             condition = self.df['EMA_50'] > self.df['EMA_200'] 
+             for days in range(days_min, days_max + 1):
+                wr = self.run_backtest_simulation(condition, days)
+                if wr > best_res['win_rate']:
+                    best_res = {"strategy": "MA Trend", "details": "Trend Following (50 > 200)", "win_rate": wr, "hold_days": days, "is_triggered_today": True}
+
+        if 'STOCHk' in self.df.columns:
+            condition = (self.df['STOCHk'] < STOCH_OVERSOLD) & (self.df['STOCHk'] > self.df['STOCHd'])
+            for days in range(days_min, days_max + 1):
+                wr = self.run_backtest_simulation(condition, days)
+                if wr > best_res['win_rate']:
+                    best_res = {"strategy": "Stoch Reversal", "details": f"Stoch K < {STOCH_OVERSOLD}", "win_rate": wr, "hold_days": days, "is_triggered_today": (self.df['STOCHk'].iloc[-1] < STOCH_OVERSOLD) & (self.df['STOCHk'].iloc[-1] > self.df['STOCHd'].iloc[-1])}
+
+        return best_res
 
     def check_fundamentals(self):
         res = {"market_cap": 0, "eps": 0, "status": "Unknown", "warning": ""}
@@ -362,6 +603,24 @@ class StockAnalyzer:
                 res["msg"] += f" Apex in ~{int(res['apex_dist'])} days."
         return res
 
+    def backtest_pattern_reliability(self):
+        if self.data_len < 200: return {"accuracy": "N/A", "count": 0}
+        wins = 0
+        total_patterns = 0
+        for i in range(100, self.data_len - 20, 5):
+            slice_df = self.df.iloc[:i]
+            res = self._detect_geometry_on_slice(slice_df)
+            if res["pattern"] != "None":
+                total_patterns += 1
+                future_window = self.df.iloc[i : i+20]
+                entry_price = slice_df['Close'].iloc[-1]
+                max_price = future_window['High'].max()
+                if max_price > (entry_price * 1.03): wins += 1
+        if total_patterns == 0: return {"accuracy": "N/A", "count": 0}
+        win_rate = (wins / total_patterns) * 100
+        verdict = "Likely Success" if win_rate > 60 else "Likely Fail" if win_rate < 40 else "Coin Flip"
+        return { "accuracy": f"{win_rate:.1f}%", "count": total_patterns, "verdict": verdict, "wins": wins }
+
     def detect_volume_breakout(self):
         res = {"detected": False, "msg": ""}
         try:
@@ -409,247 +668,6 @@ class StockAnalyzer:
                 res = {"pattern": "Bullish Engulfing", "sentiment": "Strong Reversal Up"}
         except Exception: pass
         return res
-
-    def _detect_low_cheat_on_slice(self, df_slice):
-        res = {"detected": False}
-        try:
-            if len(df_slice) < 20: return res
-            c0 = df_slice.iloc[-1]
-            vol_ma = df_slice['Volume'].rolling(20).mean().iloc[-1]
-            atr = df_slice['High'].rolling(14).max() - df_slice['Low'].rolling(14).min()
-            vol_dry = c0['Volume'] < vol_ma * 0.8
-            spread_tight = (c0['High'] - c0['Low']) < (atr / 14)
-            recent_high = df_slice['High'].iloc[-20:].max()
-            below_pivot = c0['Close'] < recent_high
-            if vol_dry and spread_tight and below_pivot:
-                res = {"detected": True}
-        except: pass
-        return res
-
-    def detect_low_cheat(self):
-        res = {"detected": False, "msg": ""}
-        try:
-            if self.data_len < 20: return res
-            if self._detect_low_cheat_on_slice(self.df)["detected"]:
-                 res = {"detected": True, "msg": "Valid Low Cheat Setup (Tight + Dry Vol)"}
-        except Exception: pass
-        return res
-
-    # ==========================================
-    # 5. BACKTESTERS (The Time Machine)
-    # ==========================================
-    def run_backtest_simulation(self, condition_series, hold_days):
-        if condition_series is None: return 0.0 
-        signals = self.df[condition_series].copy()
-        if signals.empty: return 0.0
-        future_close = self.df['Close'].shift(-hold_days)
-        current_close = self.df['Close']
-        returns = (future_close - current_close) / current_close
-        trade_returns = returns[condition_series].dropna()
-        if trade_returns.empty: return 0.0
-        return ((trade_returns > 0).sum() / len(trade_returns)) * 100
-
-    def backtest_pattern_reliability(self):
-        if self.data_len < 200: return {"accuracy": "N/A", "count": 0}
-        wins = 0
-        total_patterns = 0
-        for i in range(100, self.data_len - 20, 5):
-            slice_df = self.df.iloc[:i]
-            res = self._detect_geometry_on_slice(slice_df)
-            if res["pattern"] != "None":
-                total_patterns += 1
-                future_window = self.df.iloc[i : i+20]
-                entry_price = slice_df['Close'].iloc[-1]
-                max_price = future_window['High'].max()
-                if max_price > (entry_price * 1.03): wins += 1
-        if total_patterns == 0: return {"accuracy": "N/A", "count": 0}
-        win_rate = (wins / total_patterns) * 100
-        verdict = "Likely Success" if win_rate > 60 else "Likely Fail" if win_rate < 40 else "Coin Flip"
-        return { "accuracy": f"{win_rate:.1f}%", "count": total_patterns, "verdict": verdict, "wins": wins }
-
-    def backtest_smart_money_predictivity(self):
-        res = {"accuracy": "N/A", "avg_return": 0, "count": 0, "verdict": "Unproven", "best_horizon": 0}
-        try:
-            if self.data_len < 100: return res
-            cond = (self.df['CMF'] > 0.05) & (self.df['MFI'] < 80) & (self.df['Close'] > self.df['VWAP'])
-            signals = self.df[cond]
-            if len(signals) < 5: return res 
-            best_win_rate = -1
-            best_stats = None
-            for h in range(1, 41):
-                wins, total_return, valid_signals = 0, 0, 0
-                indices = signals.index
-                i = 0
-                while i < len(indices):
-                    idx = indices[i]
-                    loc = self.df.index.get_loc(idx)
-                    if loc > (self.data_len - (h + 1)): 
-                        i += 1; continue
-                    entry = self.df['Close'].iloc[loc]
-                    future_high = self.df['High'].iloc[loc+1 : loc+h+1].max()
-                    if future_high > (entry * 1.02): wins += 1
-                    exit_price = self.df['Close'].iloc[loc + h]
-                    total_return += (exit_price - entry) / entry
-                    valid_signals += 1
-                    i += 5
-                if valid_signals > 0:
-                    wr = (wins / valid_signals) * 100
-                    if wr > best_win_rate:
-                        best_win_rate = wr
-                        best_stats = {"accuracy": f"{wr:.1f}%", "avg_return": f"{(total_return / valid_signals) * 100:.1f}%", "count": valid_signals, "best_horizon": h}
-            if best_stats:
-                verdict = "POOR"
-                if best_win_rate > 70: verdict = "HIGHLY PREDICTIVE"
-                elif best_win_rate > 50: verdict = "MODERATE"
-                best_stats["verdict"] = verdict
-                res = best_stats
-        except Exception: pass
-        return res
-
-    def backtest_volume_breakout_behavior(self):
-        res = {"accuracy": "N/A", "avg_return_5d": 0, "count": 0, "behavior": "Unknown", "best_horizon": 0}
-        try:
-            if self.data_len < 100: return res
-            min_liq = self.config["MIN_DAILY_VOL"]
-            tx_value = self.df['Close'] * self.df['Volume']
-            signals = (
-                (self.df['Close'] > self.df['Open']) & 
-                (self.df['Close'] > self.df['Close'].shift(1)) & 
-                (self.df['Volume'] > self.df['VOL_MA']) & 
-                (tx_value > min_liq)
-            )
-            breakout_indices = self.df.index[signals]
-            if len(breakout_indices) < 5: return res
-            best_win_rate = -1
-            best_stats = None
-            numeric_indices = [self.df.index.get_loc(i) for i in breakout_indices]
-            for h in range(1, 41): 
-                wins, total_return, valid_count = 0, 0, 0
-                for idx in numeric_indices:
-                    if idx > (self.data_len - (h + 1)): continue 
-                    entry_price = self.df['Close'].iloc[idx]
-                    future_price = self.df['Close'].iloc[idx + h]
-                    ret = (future_price - entry_price) / entry_price
-                    if ret > 0.02: wins += 1
-                    total_return += ret
-                    valid_count += 1
-                if valid_count > 0:
-                    wr = (wins / valid_count) * 100
-                    if wr > best_win_rate:
-                        best_win_rate = wr
-                        best_stats = {"accuracy": f"{wr:.1f}%", "avg_return_5d": f"{(total_return / valid_count) * 100:.1f}%", "count": valid_count, "best_horizon": h}
-            if best_stats:
-                behavior = "HONEST (Trend Follower)" if best_win_rate > 60 else "FAKEOUT (Fade the Pop)" if best_win_rate < 40 else "MIXED / CHOPPY"
-                best_stats["behavior"] = behavior
-                res = best_stats
-        except Exception: pass
-        return res
-
-    def backtest_low_cheat_performance(self):
-        res = {"accuracy": "N/A", "count": 0, "verdict": "Unproven"}
-        try:
-            if self.data_len < 100: return res
-            wins = 0
-            valid_count = 0
-            for i in range(100, self.data_len - 20, 5):
-                slice_df = self.df.iloc[:i]
-                if self._detect_low_cheat_on_slice(slice_df)["detected"]:
-                    valid_count += 1
-                    entry = slice_df['Close'].iloc[-1]
-                    future = self.df.iloc[i : i+10]
-                    max_price = future['High'].max()
-                    min_price = future['Low'].min()
-                    if max_price > (entry * 1.03) and min_price > (entry * 0.98):
-                        wins += 1
-            if valid_count == 0: return res
-            win_rate = (wins / valid_count) * 100
-            verdict = "HIGH PROBABILITY" if win_rate > 65 else "RISKY" if win_rate < 40 else "MODERATE"
-            res = {"accuracy": f"{win_rate:.1f}%", "count": valid_count, "verdict": verdict}
-        except Exception: pass
-        return res
-
-    def backtest_fib_bounce(self):
-        res = {"accuracy": "N/A", "count": 0, "verdict": "Unproven"}
-        try:
-            if self.data_len < 200: return res
-            wins = 0
-            count = 0
-            lookback = self.config["FIB_LOOKBACK_DAYS"]
-            for i in range(lookback + 20, self.data_len - 20, 10):
-                past_df = self.df.iloc[i-lookback:i]
-                future_df = self.df.iloc[i:i+15]
-                sh = past_df['High'].max()
-                sl = past_df['Low'].min()
-                rng = sh - sl
-                fib_618 = sh - (0.618 * rng)
-                current_low = self.df['Low'].iloc[i]
-                if abs(current_low - fib_618) / fib_618 < 0.02:
-                    count += 1
-                    if future_df['High'].max() > (current_low * 1.05):
-                        wins += 1
-            if count == 0: return res
-            win_rate = (wins / count) * 100
-            verdict = "GOLDEN ZONE" if win_rate > 65 else "WEAK SUPPORT" if win_rate < 40 else "NEUTRAL"
-            res = {"accuracy": f"{win_rate:.1f}%", "count": count, "verdict": verdict}
-        except Exception: pass
-        return res
-
-    def backtest_ma_support(self, period=20):
-        res = {"accuracy": "N/A", "count": 0, "verdict": "Unknown"}
-        try:
-            if self.data_len < 100: return res
-            ma_col = f'EMA_{period}'
-            if ma_col not in self.df.columns: return res
-            touched_ma = (self.df['Low'] <= self.df[ma_col]) & (self.df['High'] >= self.df[ma_col])
-            uptrend = self.df['Close'] > self.df['EMA_50']
-            signals = touched_ma & uptrend
-            if signals.sum() < 5: return res
-            wins, valid_count = 0, 0
-            indices = self.df.index[signals]
-            numeric_indices = [self.df.index.get_loc(i) for i in indices]
-            for idx in numeric_indices:
-                if idx > (self.data_len - 6): continue
-                entry = self.df[ma_col].iloc[idx]
-                future_price = self.df['Close'].iloc[idx + 5]
-                if future_price > (entry * 1.02): wins += 1
-                valid_count += 1
-            if valid_count == 0: return res
-            win_rate = (wins / valid_count) * 100
-            verdict = "STRONG SUPPORT" if win_rate > 65 else "WEAK SUPPORT"
-            res = {"accuracy": f"{win_rate:.1f}%", "count": valid_count, "verdict": verdict}
-        except Exception: pass
-        return res
-
-    # ==========================================
-    # 6. DECISION LOGIC
-    # ==========================================
-    def optimize_stock(self, days_min, days_max):
-        best_res = {"strategy": None, "win_rate": -1, "details": "N/A", "hold_days": 0, "is_triggered_today": False}
-        rsi_levels = [self.config["RSI_LOWER"], self.config["RSI_LOWER"] + 10]
-
-        if 'RSI' in self.df.columns:
-            for level in rsi_levels:
-                condition = self.df['RSI'] < level
-                for days in range(days_min, days_max + 1):
-                    wr = self.run_backtest_simulation(condition, days)
-                    if wr > best_res['win_rate']:
-                        best_res = {"strategy": "RSI Reversal", "details": f"RSI < {level}", "win_rate": wr, "hold_days": days, "is_triggered_today": self.df['RSI'].iloc[-1] < level}
-
-        if 'EMA_50' in self.df.columns and self.df['EMA_50'].iloc[-1] > self.df['EMA_200'].iloc[-1]:
-             condition = self.df['EMA_50'] > self.df['EMA_200'] 
-             for days in range(days_min, days_max + 1):
-                wr = self.run_backtest_simulation(condition, days)
-                if wr > best_res['win_rate']:
-                    best_res = {"strategy": "MA Trend", "details": "Trend Following (50 > 200)", "win_rate": wr, "hold_days": days, "is_triggered_today": True}
-
-        if 'STOCHk' in self.df.columns:
-            condition = (self.df['STOCHk'] < STOCH_OVERSOLD) & (self.df['STOCHk'] > self.df['STOCHd'])
-            for days in range(days_min, days_max + 1):
-                wr = self.run_backtest_simulation(condition, days)
-                if wr > best_res['win_rate']:
-                    best_res = {"strategy": "Stoch Reversal", "details": f"Stoch K < {STOCH_OVERSOLD}", "win_rate": wr, "hold_days": days, "is_triggered_today": (self.df['STOCHk'].iloc[-1] < STOCH_OVERSOLD) & (self.df['STOCHk'].iloc[-1] > self.df['STOCHd'].iloc[-1])}
-
-        return best_res
 
     def calculate_probability(self, best_strategy, context, trend_template):
         base_prob = best_strategy.get('win_rate', 50)
@@ -735,6 +753,8 @@ class StockAnalyzer:
         
         obv_status = "Neutral"
         money_flow = "Neutral"
+        money_stats = {} # For UI Detail
+        
         if self.data_len > OBV_LOOKBACK_DAYS:
             cmf = self.df['CMF'].iloc[-1] if 'CMF' in self.df.columns else 0
             mfi = self.df['MFI'].iloc[-1] if 'MFI' in self.df.columns else 50
@@ -751,30 +771,27 @@ class StockAnalyzer:
             
             if amihud < 0.0000001 and money_flow == "RETAIL NOISE / Indecision":
                  money_flow += " (Liquid / Stealth)"
-        
-        geo_status = self.detect_geometric_patterns()
-        pattern_stats = {}
-        if geo_status["pattern"] != "None":
-            pattern_stats = self.backtest_pattern_reliability()
+                 
+            money_stats = {"CMF": cmf, "MFI": mfi, "RVOL": vol/vol_ma, "VWAP": vwap, "AMIHUD": amihud}
 
         return {
             "price": last_price, "support": support, "resistance": resistance,
             "dist_support": dist_supp, "fib_levels": fibs, "trend": trend,
-            "atr": atr, "obv_status": obv_status, "smart_money": money_flow,
-            "vcp": self.detect_vcp_pattern(), "geo": geo_status,
+            "atr": atr, "obv_status": obv_status, "smart_money": money_flow, "money_stats": money_stats, # NEW
+            "vcp": self.detect_vcp_pattern(), "geo": self.detect_geometric_patterns(),
             "candle": self.detect_candle_patterns(), "vsa": self.detect_vsa_anomalies(),
             "efi": self.df['EFI'].iloc[-1] if 'EFI' in self.df.columns else 0,
             "fundamental": self.check_fundamentals(),
             "squeeze": self.detect_ttm_squeeze(),
             "pivots": self.calculate_pivot_points(),
-            "pattern_stats": pattern_stats,
+            "pattern_stats": self.backtest_pattern_reliability(),
             "vol_breakout": self.detect_volume_breakout(),
             "sm_predict": self.backtest_smart_money_predictivity(),
             "breakout_behavior": self.backtest_volume_breakout_behavior(),
             "lc_stats": self.backtest_low_cheat_performance(), 
             "low_cheat": self.detect_low_cheat(),
             "fib_stats": self.backtest_fib_bounce(),
-            "ma_stats": self.backtest_ma_support(20)
+            "ma_stats": self.backtest_ma_support_all()
         }
 
     def adjust_to_tick_size(self, price):
@@ -812,6 +829,7 @@ class StockAnalyzer:
         elif "WAIT" in action:
             plan['status'] = "PENDING (Limit)"
             
+            # 1. Volume Breakout Override
             if vol_breakout['detected']:
                 plan['entry'] = self.adjust_to_tick_size(current_price)
                 plan['status'] = "EXECUTE NOW (Momentum)"
@@ -825,6 +843,7 @@ class StockAnalyzer:
                      plan['take_profit_3r'] = self.adjust_to_tick_size(tp_3r)
                 return plan
 
+            # 2. Low Cheat Override
             if low_cheat['detected']:
                 plan['entry'] = self.adjust_to_tick_size(current_price)
                 plan['status'] = "EARLY ENTRY (Low Cheat)"
@@ -838,31 +857,34 @@ class StockAnalyzer:
                      plan['take_profit_3r'] = self.adjust_to_tick_size(tp_3r)
                 return plan
             
+            # 3. MA Power Trend Override
             if "PERFECT" in trend_status and "STRONG" in ma_stats['verdict']:
-                ema20 = self.df['EMA_20'].iloc[-1]
-                if abs(current_price - ema20) / current_price < 0.02:
+                ma_name = ma_stats['best_ma']
+                ma_val = self.df[ma_name.replace(' ', '_')].iloc[-1]
+                if abs(current_price - ma_val) / current_price < 0.02:
                     plan['entry'] = self.adjust_to_tick_size(current_price)
                     plan['status'] = "EXECUTE NOW (Power Trend Dip)"
-                    sl_price = self.adjust_to_tick_size(ema20 - (atr * 2.0))
+                    sl_price = self.adjust_to_tick_size(ma_val - (atr * 2.0))
                     plan['stop_loss'] = sl_price
-                    plan['take_profit'] = self.adjust_to_tick_size(ema20 + (atr * tp_mult))
+                    plan['take_profit'] = self.adjust_to_tick_size(ma_val + (atr * tp_mult))
                     risk = current_price - sl_price
                     if risk > 0: tp_3r = current_price + (risk * 3.0); plan['take_profit_3r'] = self.adjust_to_tick_size(tp_3r)
                     return plan
-                elif ema20 > (current_price * 0.9):
-                    plan['entry'] = self.adjust_to_tick_size(ema20)
-                    plan['note'] = "Wait for EMA 20 Bounce (Power Trend)"
-                    sl_price = self.adjust_to_tick_size(ema20 - (atr * 2.0))
+                elif ma_val > (current_price * 0.9):
+                    plan['entry'] = self.adjust_to_tick_size(ma_val)
+                    plan['note'] = f"Wait for {ma_name} Bounce"
+                    sl_price = self.adjust_to_tick_size(ma_val - (atr * 2.0))
                     plan['stop_loss'] = sl_price
-                    plan['take_profit'] = self.adjust_to_tick_size(ema20 + (atr * tp_mult))
-                    risk = ema20 - sl_price
-                    if risk > 0: tp_3r = ema20 + (risk * 3.0); plan['take_profit_3r'] = self.adjust_to_tick_size(tp_3r)
+                    plan['take_profit'] = self.adjust_to_tick_size(ma_val + (atr * tp_mult))
+                    risk = ma_val - sl_price
+                    if risk > 0: tp_3r = ma_val + (risk * 3.0); plan['take_profit_3r'] = self.adjust_to_tick_size(tp_3r)
                     plan['risk_reward'] = "Projection"
                     return plan
 
             strategy_type = best_strategy.get('strategy', 'None')
             target_price = support 
             
+            # 4. Smart Selection Logic
             if "RSI" in strategy_type or "Stoch" in strategy_type:
                 target_fib = 0
                 for _, price in sorted(fib_levels.items(), key=lambda x: x[1], reverse=True):
@@ -884,6 +906,7 @@ class StockAnalyzer:
                 else: target_price = support; plan['note'] = "Wait for Major Support"
             
             elif "MA" in strategy_type:
+                # Momentum Priority: Breakout or S1
                 s1 = pivots.get("S1", 0)
                 if s1 > (current_price * 0.9): target_price = s1; plan['note'] = "Wait for Pivot S1"
                 else: target_price = resistance; plan['note'] = "Buy Breakout"
