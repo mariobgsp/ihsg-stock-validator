@@ -153,7 +153,7 @@ def print_report(data):
     # 7. FIBONACCI LEVELS (RESTORED)
     print(f"\n--- FIBONACCI KEY LEVELS ---")
     fibs = ctx.get('fib_levels', {})
-    fib_stats = ctx.get('fib_stats', {})
+    fib_stats = ctx.get('fib_stats', {}) # NEW
 
     curr_p = data['price']
     if fibs:
@@ -162,6 +162,7 @@ def print_report(data):
             elif curr_p < price: return "[RESISTANCE]"
             else: return "[AT LEVEL]"
 
+        # Display Backtest Result for Fibs
         if fib_stats.get('count', 0) > 0:
             print(f"Fib Bounce Stats: {fib_stats['accuracy']} Win Rate ({fib_stats['verdict']})")
 
@@ -215,5 +216,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
