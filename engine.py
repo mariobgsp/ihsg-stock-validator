@@ -1023,6 +1023,7 @@ class StockAnalyzer:
         
         trend_template = self.check_trend_template()
         ctx = self.get_market_context()
+        trend_template = self.check_trend_template()
         
         # Validation Logic (Original)
         action = "WAIT"
