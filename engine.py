@@ -194,9 +194,11 @@ class StockAnalyzer:
         amihud = (ret / dol_vol) * 1000000000
         return amihud.rolling(window=period).mean()
 
+    # --- NEW: Accumulation/Distribution Line ---
     def calc_ad_line(self, high, low, close, volume):
+        # Money Flow Multiplier = [(Close  -  Low) - (High - Close)] /(High - Low) 
         mfm = ((close - low) - (high - close)) / (high - low)
-        mfm = mfm.fillna(0)
+        mfm = mfm.fillna(0) # Handle divide by zero
         mfv = mfm * volume
         ad_line = mfv.cumsum()
         return ad_line
@@ -204,6 +206,7 @@ class StockAnalyzer:
     def prepare_indicators(self):
         if self.df is None or self.df.empty: return
 
+        # MAs
         self.df['EMA_20'] = self.calc_ema(self.df['Close'], 20)
         self.df['EMA_50'] = self.calc_ema(self.df['Close'], 50)
         self.df['EMA_100'] = self.calc_ema(self.df['Close'], 100)
@@ -211,12 +214,15 @@ class StockAnalyzer:
         self.df['EMA_200'] = self.calc_ema(self.df['Close'], 200)
         self.active_trend_col = 'EMA_200'
 
+        # Momentum
         self.df['RSI'] = self.calc_rsi(self.df['Close'], self.config["RSI_PERIOD"])
         k, d = self.calc_stoch(self.df['High'], self.df['Low'], self.df['Close'], STOCH_K_PERIOD, STOCH_D_PERIOD)
         self.df[f"STOCHk"] = k
         self.df[f"STOCHd"] = d
 
+        # Volume & Smart Money Proxies
         self.df['OBV'] = self.calc_obv(self.df['Close'], self.df['Volume'])
+        # --- NEW: A/D Line ---
         self.df['AD_Line'] = self.calc_ad_line(self.df['High'], self.df['Low'], self.df['Close'], self.df['Volume'])
         
         self.df['CMF'] = self.calc_cmf(self.df['High'], self.df['Low'], self.df['Close'], self.df['Volume'], self.config["CMF_PERIOD"])
@@ -227,6 +233,7 @@ class StockAnalyzer:
         self.df['EFI'] = self.calc_force_index(self.df['Close'], self.df['Volume'], 13)
         self.df['AMIHUD'] = self.calc_amihud(self.df['Close'], self.df['Volume'], 20)
 
+        # VWAP & NVI
         tp = (self.df['High'] + self.df['Low'] + self.df['Close']) / 3
         self.df['VWAP'] = (tp * self.df['Volume']).rolling(20).sum() / self.df['Volume'].rolling(20).sum()
         
@@ -243,8 +250,10 @@ class StockAnalyzer:
         self.df['NVI'] = pd.Series(nvi, index=self.df.index)
         self.df['NVI_EMA'] = self.df['NVI'].ewm(span=255).mean()
 
+        # ATR
         self.df['ATR'] = self.calc_atr(self.df['High'], self.df['Low'], self.df['Close'], self.config["ATR_PERIOD"])
 
+    # --- NEW: LIQUIDITY CHECK ---
     def check_liquidity_quality(self):
         try:
             adtv = self.df['TxValue'].rolling(20).mean().iloc[-1]
@@ -255,9 +264,13 @@ class StockAnalyzer:
         except: return {"status": "UNKNOWN", "msg": "Calc Error", "adtv": 0}
 
     def check_trend_template(self):
+        # Updated to handle IPOs and stocks between 200-260 days
         res = {"status": "FAIL", "score": 0, "max_score": 6, "details": []}
         try:
+            # Check for valid 200 MA (Requires ~200 days)
             has_200 = self.data_len >= 200
+            
+            # If extremely new (<50 days), we can't do much
             if self.data_len < 50:
                  res["details"].append("Insufficient data (Need > 50 days)")
                  return res
@@ -265,24 +278,33 @@ class StockAnalyzer:
             curr = self.df['Close'].iloc[-1]
             ema_50 = self.df['EMA_50'].iloc[-1]
             
+            # --- IPO MODE (50 < Data < 200) ---
             if not has_200:
                 res["status"] = "IPO / NEW LISTING"
-                res["max_score"] = 3
+                res["max_score"] = 3 # Score is out of 3 for IPOs
+                
+                # Use All-Time Highs/Lows since listing
                 ath = self.df['High'].max()
                 atl = self.df['Low'].min()
+                
                 c1 = curr > ema_50
-                c2 = curr >= (0.75 * ath)
-                c3 = curr >= (1.25 * atl)
+                c2 = curr >= (0.75 * ath) # Near ATH
+                c3 = curr >= (1.25 * atl) # Momentum from low
+                
                 score = sum([c1, c2, c3])
                 res["score"] = score
                 if score == 3: res["status"] = "IPO POWER TREND"
                 elif score >= 1: res["status"] = "IPO UPTREND"
+                
                 if c1: res["details"].append("Price > EMA 50 (Short Term Trend)")
                 if c2: res["details"].append("Near All-Time Highs")
                 res["details"].append(f"Note: No EMA 200 yet ({self.data_len} days listed)")
                 return res
 
+            # --- STANDARD MODE (Data >= 200) ---
+            # Fix: Lookback is min(260, data_len) to handle stocks between 200-260 days
             lookback = min(self.data_len, 260)
+            
             ema_150 = self.df['EMA_150'].iloc[-1]
             ema_200 = self.df['EMA_200'].iloc[-1]
             year_high = self.df['High'].iloc[-lookback:].max()
@@ -310,6 +332,7 @@ class StockAnalyzer:
         except Exception as e: res["details"].append(f"Error: {str(e)}")
         return res
 
+    # --- ALL ORIGINAL BACKTEST FUNCTIONS (RESTORED) ---
     def run_backtest_simulation(self, condition_series, hold_days):
         if condition_series is None: return 0.0 
         signals = self.df[condition_series].copy()
@@ -758,6 +781,22 @@ class StockAnalyzer:
         except: pass
         return res
 
+    # --- RESTORED: Candle Pattern Detection ---
+    def detect_candle_patterns(self):
+        res = {"pattern": "None", "sentiment": "Neutral"}
+        try:
+            if self.data_len < 4: return res
+            df = self.df.iloc[-4:].copy()
+            df['Body'] = abs(df['Close'] - df['Open'])
+            c0, c1 = df.iloc[-1], df.iloc[-2]
+            is_green = c0['Close'] > c0['Open']
+            if not is_green and c0['Open'] > c1['Close'] and c0['Close'] < c1['Open']: 
+                res = {"pattern": "Bearish Engulfing", "sentiment": "Strong Reversal Down"}
+            elif is_green and c0['Close'] > c1['Open'] and c0['Open'] < c1['Close']: 
+                res = {"pattern": "Bullish Engulfing", "sentiment": "Strong Reversal Up"}
+        except Exception: pass
+        return res
+
     def analyze_smart_money_enhanced(self):
         res = {"status": "NEUTRAL", "signals": [], "metrics": {}}
         try:
@@ -911,13 +950,11 @@ class StockAnalyzer:
         }
         
         sm = self.analyze_smart_money_enhanced()
-        
-        # New: Get Pattern Counts
         pat_counts = self.scan_historical_patterns()
         
         return {
             "price": last_price, "change_pct": change_pct, 
-            "ma_values": ma_values, "pattern_counts": pat_counts, # Added pattern counts
+            "ma_values": ma_values, "pattern_counts": pat_counts, 
             "support": support, "resistance": resistance,
             "dist_support": dist_supp, "fib_levels": fibs, 
             "atr": atr, "smart_money": sm, 
