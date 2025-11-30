@@ -797,19 +797,41 @@ class StockAnalyzer:
         except Exception: pass
         return res
 
+    # --- RESTORED: VSA Anomalies Detection ---
+    def detect_vsa_anomalies(self):
+        res = {"detected": False, "msg": ""}
+        try:
+            if self.data_len < 2: return res
+            c0 = self.df.iloc[-1]
+            spread = c0['High'] - c0['Low']
+            avg_spread = (self.df['High'] - self.df['Low']).rolling(20).mean().iloc[-1]
+            vol_ratio = c0['RVOL'] 
+            is_down_or_flat = c0['Close'] <= c0['Open']
+            if is_down_or_flat and vol_ratio > 1.5 and spread < avg_spread:
+                res = {"detected": True, "msg": "Stopping Volume (Absorption)"}
+            elif vol_ratio > 2.0 and spread < (0.5 * avg_spread):
+                res = {"detected": True, "msg": "Churning (High Effort, Low Result)"}
+        except Exception: pass
+        return res
+
     def analyze_smart_money_enhanced(self):
-        res = {"status": "NEUTRAL", "signals": [], "metrics": {}}
+        # IMPROVED: Now uses A/D Line, Stopping Volume, No Demand, and Green/Red Ratio
+        res = {"status": "NEUTRAL", "signals": [], "metrics": {}} # Added metrics
         try:
             c0 = self.df.iloc[-1]
             score = 0
             
+            # --- METRIC 1: BUYING PRESSURE (Green Vol vs Red Vol in last 20 days) ---
             recent = self.df.iloc[-20:]
             green_vol = recent[recent['Close'] > recent['Open']]['Volume'].sum()
             red_vol = recent[recent['Close'] < recent['Open']]['Volume'].sum()
             total_vol = green_vol + red_vol
             buy_pressure = (green_vol / total_vol) * 100 if total_vol > 0 else 50
             
+            # --- METRIC 2: BIG MONEY SPIKES ---
+            # Adjusted threshold to 1.25x (125%) to catch more signals
             avg_vol = recent['Volume'].mean()
+            # Handle case where avg_vol is 0 to avoid error
             if avg_vol > 0:
                 spikes = recent[recent['Volume'] > 1.25 * avg_vol]
                 green_spikes = len(spikes[spikes['Close'] > spikes['Open']])
@@ -817,13 +839,21 @@ class StockAnalyzer:
             else:
                 green_spikes, red_spikes = 0, 0
 
-            res['metrics'] = {'buy_pressure': buy_pressure, 'green_spikes': green_spikes, 'red_spikes': red_spikes}
+            # Save metrics to result
+            res['metrics'] = {
+                'buy_pressure': buy_pressure,
+                'green_spikes': green_spikes,
+                'red_spikes': red_spikes
+            }
 
+            # 1. VWAP (Value)
             if c0['Close'] > c0['VWAP']: score += 1; res['signals'].append("Price > VWAP (Inst. Support)")
             else: score -= 1; res['signals'].append("Price < VWAP (Weakness)")
 
+            # 2. NVI (Smart Money Accumulation)
             if c0['NVI'] > c0['NVI_EMA']: score += 1; res['signals'].append("NVI > EMA (Accumulation)")
             
+            # 3. A/D Line (Trend Divergence)
             if 'AD_Line' in self.df.columns and len(self.df) > 5:
                 ad_slope = self.calc_slope(self.df['AD_Line'], 5)
                 price_slope = self.calc_slope(self.df['Close'], 5)
@@ -832,20 +862,24 @@ class StockAnalyzer:
                 elif ad_slope > 0:
                      score += 1; res['signals'].append("A/D Line Rising (Buying Pressure)")
 
+            # 4. Institutional Dominance (FIXED LOGIC HERE)
             if buy_pressure > 60:
                  score += 1; res['signals'].append(f"Buying Pressure Dominant ({buy_pressure:.0f}%)")
-            elif buy_pressure < 40:
+            elif buy_pressure < 40: # <--- LOGIKA BARU DITAMBAHKAN
                  score -= 1; res['signals'].append(f"Selling Pressure Dominant ({100-buy_pressure:.0f}%)")
 
+            # 5. Advanced VSA
             spread = c0['High'] - c0['Low']
             avg_spread = self.df['ATR'].iloc[-1]
             is_down = c0['Close'] < c0['Open']
             is_up = c0['Close'] > c0['Open']
             
+            # Stopping Volume (Bullish)
             lower_wick = min(c0['Open'], c0['Close']) - c0['Low']
             if is_down and c0['RVOL'] > 1.5 and lower_wick > (0.4 * spread):
                  score += 2; res['signals'].append("VSA: Stopping Volume (Potential Reversal)")
             
+            # No Demand (Bearish)
             if is_up and c0['RVOL'] < 0.7:
                  score -= 1; res['signals'].append("VSA: No Demand (Weak Rally)")
 
@@ -874,6 +908,7 @@ class StockAnalyzer:
         else: tick = 25
         return round(price / tick) * tick
 
+    # --- HYBRID TRADE PLAN (Old + New Priority) ---
     def calculate_trade_plan_hybrid(self, ctx, trend_status, best_strategy, rect):
         plan = {"type": "HYBRID", "entry": 0, "stop_loss": 0, "take_profit": 0, "status": "WAIT", "reason": "No Signal"}
         
@@ -882,24 +917,29 @@ class StockAnalyzer:
         trigger = False
         raw_sl = 0
         
+        # Priority 1: New Rectangle Breakout
+        # Fix: Only trigger if it is a FRESH breakout
         if rect['detected'] and "FRESH BREAKOUT" in rect['status']:
              plan["status"] = "EXECUTE (Box Breakout)"
              plan["reason"] = f"MOMENTUM: Box Breakout (Rp {rect['top']:,.0f})."
              raw_sl = rect['top'] - atr
              trigger = True
 
+        # Priority 2: New Rectangle Support
         elif rect['detected'] and abs(current_price - rect['bottom'])/rect['bottom'] < 0.02:
              plan["status"] = "EXECUTE (Support Bounce)"
              plan["reason"] = f"VALUE: Box Support (Rp {rect['bottom']:,.0f})."
              raw_sl = rect['bottom'] - (atr * 0.5)
              trigger = True
 
+        # Priority 3: Old Low Cheat
         elif ctx['low_cheat']['detected']:
              plan["status"] = "EARLY ENTRY (Low Cheat)"
              plan["reason"] = "VCP: Valid Low Cheat Setup."
              raw_sl = current_price - (atr * 1.5)
              trigger = True
              
+        # Priority 4: Old Standard Trend
         elif best_strategy['is_triggered_today'] and "UPTREND" in trend_status:
              plan["status"] = "EXECUTE (Trend Follow)"
              plan["reason"] = f"STRATEGY: {best_strategy['strategy']} Triggered in Uptrend."
@@ -936,6 +976,7 @@ class StockAnalyzer:
         
         atr = self.df['ATR'].iloc[-1] if 'ATR' in self.df.columns else 0
 
+        # --- UPDATE: Change % and MA Values ---
         change_pct = 0
         if len(self.df) >= 2:
             c0 = self.df['Close'].iloc[-1]
@@ -949,15 +990,16 @@ class StockAnalyzer:
             "EMA_200": self.df['EMA_200'].iloc[-1] if 'EMA_200' in self.df.columns else 0,
         }
         
+        # New Smart Money Analysis
         sm = self.analyze_smart_money_enhanced()
         pat_counts = self.scan_historical_patterns()
         
         return {
-            "price": last_price, "change_pct": change_pct, 
-            "ma_values": ma_values, "pattern_counts": pat_counts, 
+            "price": last_price, "change_pct": change_pct, # Added change_pct
+            "ma_values": ma_values, "pattern_counts": pat_counts, # Added pattern counts
             "support": support, "resistance": resistance,
             "dist_support": dist_supp, "fib_levels": fibs, 
-            "atr": atr, "smart_money": sm, 
+            "atr": atr, "smart_money": sm, # New Enhanced
             "vcp": self.detect_vcp_pattern(), 
             "geo": self.detect_geometric_patterns(),
             "candle": self.detect_candle_patterns(), 
@@ -980,6 +1022,7 @@ class StockAnalyzer:
         self.prepare_indicators()
         self.analyze_news_sentiment()
         
+        # New Feature Calls
         rect = self.detect_rectangle_pattern()
         liq = self.check_liquidity_quality()
         best_strategy = self.optimize_stock(1, 60)
@@ -987,16 +1030,18 @@ class StockAnalyzer:
         trend_template = self.check_trend_template()
         ctx = self.get_market_context()
         
+        # Validation Logic (Original)
         action = "WAIT"
         if best_strategy['is_triggered_today'] and trend_template['score'] >= 4: action = "ACTION: BUY"
         val_score, val_verdict, val_reasons = self.validate_signal(action, ctx, trend_template)
         prob_data = self.calculate_probability(best_strategy, ctx, trend_template)
 
+        # Plan (Hybrid)
         plan = self.calculate_trade_plan_hybrid(ctx, trend_template['status'], best_strategy, rect)
 
         return {
             "ticker": self.ticker, "name": self.info.get('longName', self.ticker),
-            "price": ctx['price'], "change_pct": ctx['change_pct'], 
+            "price": ctx['price'], "change_pct": ctx['change_pct'], # Pass to report
             "sentiment": self.news_analysis, "context": ctx,
             "plan": plan, 
             "validation": {"score": val_score, "verdict": val_verdict, "reasons": val_reasons},
