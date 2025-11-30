@@ -802,7 +802,12 @@ class StockAnalyzer:
             
             if valid and 0.03 < height_pct < 0.25 and valid_loc:
                 status = "INSIDE BOX"
-                if curr > best_top: status = "BREAKOUT"
+                if curr > best_top:
+                    # Fix: Check if breakout is fresh (within 3-5% of top)
+                    if curr <= (best_top * 1.03):
+                        status = "FRESH BREAKOUT"
+                    else:
+                        status = "EXTENDED (Caution)"
                 
                 res = {
                     "detected": True, "top": best_top, "bottom": best_bot, 
@@ -860,9 +865,11 @@ class StockAnalyzer:
                 elif ad_slope > 0:
                      score += 1; res['signals'].append("A/D Line Rising (Buying Pressure)")
 
-            # 4. Institutional Dominance (Green vs Red Vol)
+            # 4. Institutional Dominance (FIXED LOGIC HERE)
             if buy_pressure > 60:
                  score += 1; res['signals'].append(f"Buying Pressure Dominant ({buy_pressure:.0f}%)")
+            elif buy_pressure < 40: # <--- LOGIKA BARU DITAMBAHKAN
+                 score -= 1; res['signals'].append(f"Selling Pressure Dominant ({100-buy_pressure:.0f}%)")
 
             # 5. Advanced VSA
             spread = c0['High'] - c0['Low']
@@ -914,7 +921,8 @@ class StockAnalyzer:
         raw_sl = 0
         
         # Priority 1: New Rectangle Breakout
-        if rect['detected'] and "BREAKOUT" in rect['status']:
+        # Fix: Only trigger if it is a FRESH breakout
+        if rect['detected'] and "FRESH BREAKOUT" in rect['status']:
              plan["status"] = "EXECUTE (Box Breakout)"
              plan["reason"] = f"MOMENTUM: Box Breakout (Rp {rect['top']:,.0f})."
              raw_sl = rect['top'] - atr
@@ -1023,7 +1031,6 @@ class StockAnalyzer:
         
         trend_template = self.check_trend_template()
         ctx = self.get_market_context()
-        trend_template = self.check_trend_template()
         
         # Validation Logic (Original)
         action = "WAIT"
@@ -1045,3 +1052,5 @@ class StockAnalyzer:
             "rectangle": rect, "best_strategy": best_strategy,
             "is_ipo": self.data_len < 200, "days_listed": self.data_len
         }
+
+
