@@ -199,10 +199,7 @@ class StockAnalyzer:
         ad_line = mfv.cumsum()
         return ad_line
 
-    # --- NEW: Price Volume Trend (PVT) ---
     def calc_pvt(self, close, volume):
-        # PVT = Cumulative ( %Change * Volume )
-        # More sensitive than OBV for large moves
         pct_change = close.pct_change().fillna(0)
         pvt = (pct_change * volume).cumsum()
         return pvt
@@ -224,8 +221,6 @@ class StockAnalyzer:
 
         self.df['OBV'] = self.calc_obv(self.df['Close'], self.df['Volume'])
         self.df['AD_Line'] = self.calc_ad_line(self.df['High'], self.df['Low'], self.df['Close'], self.df['Volume'])
-        
-        # --- NEW: PVT Indicator ---
         self.df['PVT'] = self.calc_pvt(self.df['Close'], self.df['Volume'])
         
         self.df['CMF'] = self.calc_cmf(self.df['High'], self.df['Low'], self.df['Close'], self.df['Volume'], self.config["CMF_PERIOD"])
@@ -263,6 +258,17 @@ class StockAnalyzer:
             return {"status": "PASS", "msg": f"Healthy Liquidity ({adtv/1e9:.2f}B IDR)", "adtv": adtv}
         except: return {"status": "UNKNOWN", "msg": "Calc Error", "adtv": 0}
 
+    def get_market_regime(self):
+        regime = "NEUTRAL"
+        if self.market_df is not None and not self.market_df.empty:
+            m_close = self.market_df['Close']
+            m_ma200 = m_close.rolling(200).mean().iloc[-1]
+            if m_close.iloc[-1] > m_ma200:
+                regime = "BULLISH"
+            else:
+                regime = "BEARISH"
+        return regime
+
     def check_trend_template(self):
         res = {"status": "FAIL", "score": 0, "max_score": 6, "details": []}
         try:
@@ -274,6 +280,10 @@ class StockAnalyzer:
             curr = self.df['Close'].iloc[-1]
             ema_50 = self.df['EMA_50'].iloc[-1]
             
+            regime = self.get_market_regime()
+            if regime == "BEARISH":
+                res["details"].append("NOTE: Market (IHSG) is Bearish. Be cautious.")
+
             if not has_200:
                 res["status"] = "IPO / NEW LISTING"
                 res["max_score"] = 3
@@ -552,8 +562,9 @@ class StockAnalyzer:
                     best_res = {"strategy": "MA Trend", "details": "Trend Following (50 > 200)", "win_rate": wr, "hold_days": days, "is_triggered_today": True}
         return best_res
 
+    # --- UPDATED: Fundamentals with Altman Z-Score ---
     def check_fundamentals(self):
-        res = {"market_cap": 0, "eps": 0, "pe": 0, "roe": 0, "pbv": 0, "status": "Unknown", "warning": ""}
+        res = {"market_cap": 0, "eps": 0, "pe": 0, "roe": 0, "pbv": 0, "status": "Unknown", "warning": "", "z_score": "N/A"}
         try:
             mcap = self.info.get('marketCap', 0)
             eps = self.info.get('trailingEps', 0)
@@ -563,6 +574,21 @@ class StockAnalyzer:
             res['pe'] = self.info.get('trailingPE', 0)
             res['roe'] = self.info.get('returnOnEquity', 0)
             res['pbv'] = self.info.get('priceToBook', 0)
+
+            # PBV Fix: Calculate manually if data is suspicious
+            if (res['pbv'] > 50 or res['pbv'] == 0) and res['pe'] > 0 and res['roe'] > 0:
+                res['pbv'] = res['pe'] * res['roe']
+
+            total_debt = self.info.get('totalDebt', 0)
+            total_cash = self.info.get('totalCash', 0)
+            if total_debt > 0 and total_cash > 0:
+                curr_ratio = self.info.get('currentRatio', 0)
+                if curr_ratio < 1.0:
+                    res['z_score'] = "DISTRESS ZONE (High Risk)"
+                elif total_debt > (3 * total_cash):
+                    res['z_score'] = "GREY ZONE (High Debt)"
+                else:
+                    res['z_score'] = "SAFE ZONE"
 
             min_cap = self.config["MIN_MARKET_CAP"]
             if mcap == 0: res['status'] = "Unknown (Data Missing)"

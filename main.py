@@ -9,7 +9,7 @@ def clear_screen():
 
 def print_header():
     print("="*65)
-    print("      IHSG ULTIMATE SCANNER (V3.2 - Geometry Edition)      ")
+    print("      IHSG ULTIMATE SCANNER (V3.2 - Final Hedge Fund)      ")
     print("      Trend + VSA + Patterns + Smart Money + Prediction")
     print("="*65)
 
@@ -41,6 +41,7 @@ def print_report(data, balance):
     if fund.get('pbv'): print(f"   PBV Ratio:  {fund.get('pbv', 0):.2f}x")
     if fund.get('roe'): print(f"   ROE:        {fund.get('roe', 0)*100:.2f}%")
     if fund.get('warning'): print(f"   ⚠️ {fund['warning']}")
+    if fund.get('z_score'): print(f"   🛡️ Safety:   {fund['z_score']} (Altman Z)")
 
     # 3. TREND HEALTH (Minervini)
     tt = data['trend_template']
@@ -151,7 +152,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('ticker', nargs='?')
     
-    parser.add_argument('--balance', type=int, default=100_000_000, help="Account Balance (IDR)")
+    parser.add_argument('--balance', type=int, default=10_000_000, help="Account Balance (IDR)")
     parser.add_argument('--risk', type=float, default=1.0, help="Risk per trade (%)")
     
     parser.add_argument('--period', default=DEFAULT_CONFIG['BACKTEST_PERIOD'], help="Data period (e.g. 1y, 2y)")
