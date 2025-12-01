@@ -317,11 +317,14 @@ class StockAnalyzer:
             c4 = curr > ema_50
             c5 = curr >= (1.25 * year_low)
             c6 = curr >= (0.75 * year_high)
-            
+
             score = sum([c1, c2, c3, c4, c5, c6])
             res["score"] = score
+            
+            # --- FIX: Added Logic for Score 3 ---
             if score == 6: res["status"] = "PERFECT UPTREND (Stage 2)"
             elif score >= 4: res["status"] = "STRONG UPTREND"
+            elif score == 3: res["status"] = "WEAK UPTREND / RECOVERY" # <--- NEW LINE
             elif score <= 2: res["status"] = "DOWNTREND / BASE"
             
             if c1 and c2: res["details"].append("MA Alignment (Price > 150 > 200)")
