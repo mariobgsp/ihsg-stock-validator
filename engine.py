@@ -18,14 +18,17 @@ DEFAULT_CONFIG = {
     "RSI_PERIOD": 14,
     "RSI_LOWER": 30,
     "ATR_PERIOD": 14,
-    "SL_MULTIPLIER": 2.5,
-    "TP_MULTIPLIER": 5.0, # Adjusted for Risk Reward
+    
+    # --- SWING CALIBRATION ---
+    # We use wider stops for Swing Trading to avoid noise.
+    "SL_MULTIPLIER": 3.0,  # Widen from 2.5 to 3.0 for Swing
+    "TP_MULTIPLIER": 6.0,  # Aim for bigger wins (1:2 min, ideally trend follow)
+    
     "CMF_PERIOD": 20,
     "MFI_PERIOD": 14,
     "VOL_MA_PERIOD": 20,
     "MIN_MARKET_CAP": 500_000_000_000, 
     "MIN_DAILY_VOL": 1_000_000_000,
-    # --- NEW CONFIGS ---
     "MIN_ADTV_IDR": 5_000_000_000,
     "ACCOUNT_BALANCE": 100_000_000,
     "RISK_PER_TRADE_PCT": 1.0
@@ -586,6 +589,7 @@ class StockAnalyzer:
                     best_res = {"strategy": "MA Trend", "details": "Trend Following (50 > 200)", "win_rate": wr, "hold_days": days, "is_triggered_today": True}
         return best_res
 
+    # --- UPDATED: Fundamentals with Altman Z-Score ---
     def check_fundamentals(self):
         res = {"market_cap": 0, "eps": 0, "pe": 0, "roe": 0, "pbv": 0, "status": "Unknown", "warning": "", "z_score": "N/A"}
         try:
@@ -954,7 +958,7 @@ class StockAnalyzer:
         else: tick = 25
         return round(price / tick) * tick
 
-    # --- UPDATED: Sniper Edition Trade Plan ---
+    # --- UPDATED: Sniper Edition Trade Plan with Swing Adjustments ---
     def calculate_trade_plan_hybrid(self, ctx, trend_status, best_strategy, rect):
         # Default Plan
         plan = {
@@ -980,7 +984,7 @@ class StockAnalyzer:
                  valid_setups.append({
                     "reason": f"SNIPER: High Vol Breakout (Rp {rect['top']:,.0f})",
                     "entry": rect['top'], 
-                    "sl": rect['top'] - atr,
+                    "sl": rect['top'] - (atr * 2.0), # Swing: Wider SL (2.0 ATR)
                     "type": "BREAKOUT"
                 })
 
@@ -989,7 +993,7 @@ class StockAnalyzer:
             valid_setups.append({
                 "reason": f"VALUE: Box Support Bounce (Rp {rect['bottom']:,.0f})",
                 "entry": rect['bottom'], 
-                "sl": rect['bottom'] - (atr * 0.5),
+                "sl": rect['bottom'] - (atr * 1.5), # Swing: Moderate SL (1.5 ATR)
                 "type": "SUPPORT"
             })
 
@@ -998,7 +1002,7 @@ class StockAnalyzer:
             valid_setups.append({
                 "reason": "VCP: Valid Low Cheat Setup",
                 "entry": current_price,
-                "sl": current_price - (atr * 1.5),
+                "sl": current_price - (atr * 2.0), # Swing: Wider SL
                 "type": "EARLY_ENTRY"
             })
              
@@ -1008,7 +1012,7 @@ class StockAnalyzer:
             valid_setups.append({
                 "reason": f"CONFLUENCE: {best_strategy['strategy']} + Smart Money + Strong Trend",
                 "entry": current_price,
-                "sl": current_price - (atr * 2.5),
+                "sl": current_price - (atr * 3.0), # Swing: Wide SL for Trend Following
                 "type": "TREND"
             })
 
@@ -1018,7 +1022,7 @@ class StockAnalyzer:
              valid_setups.append({
                 "reason": f"GEOMETRY: {geo['pattern']} Support Bounce",
                 "entry": current_price,
-                "sl": current_price - (atr * 1.0),
+                "sl": current_price - (atr * 1.5),
                 "type": "CHANNEL"
             })
 
