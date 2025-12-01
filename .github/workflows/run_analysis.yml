@@ -42,7 +42,7 @@ jobs:
     - name: Analyze Stock 4
       run: python main.py AVIA --period 2y --balance 1000000
     - name: Analyze Stock 5
-      run: python main.py ADRO --period 2y --balance 1000000
+      run: python main.py HRUM --period 2y --balance 1000000
 
 
 
