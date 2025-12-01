@@ -556,7 +556,11 @@ class StockAnalyzer:
         try:
             mcap = self.info.get('marketCap', 0)
             eps = self.info.get('trailingEps', 0)
-            
+
+            # If PBV from API is > 50 (suspicious) or 0, calculate it manually:
+            if (res['pbv'] > 50 or res['pbv'] == 0) and res['pe'] > 0 and res['roe'] > 0:
+                res['pbv'] = res['pe'] * res['roe']
+
             # --- UPDATE: More Fundamental Data ---
             res['market_cap'] = mcap
             res['eps'] = eps
@@ -866,6 +870,8 @@ class StockAnalyzer:
             # 4. Institutional Dominance (Green vs Red Vol)
             if buy_pressure > 60:
                  score += 1; res['signals'].append(f"Buying Pressure Dominant ({buy_pressure:.0f}%)")
+            elif buy_pressure < 40:
+                 score -= 1; res['signals'].append(f"Selling Pressure Dominant ({100-buy_pressure:.0f}%)")
 
             # 5. Advanced VSA
             spread = c0['High'] - c0['Low']
