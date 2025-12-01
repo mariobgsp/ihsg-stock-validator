@@ -18,11 +18,8 @@ DEFAULT_CONFIG = {
     "RSI_PERIOD": 14,
     "RSI_LOWER": 30,
     "ATR_PERIOD": 14,
-    
-    # --- SWING CALIBRATION ---
     "SL_MULTIPLIER": 3.0, 
     "TP_MULTIPLIER": 6.0,
-    
     "CMF_PERIOD": 20,
     "MFI_PERIOD": 14,
     "VOL_MA_PERIOD": 20,
@@ -205,34 +202,6 @@ class StockAnalyzer:
         pct_change = close.pct_change().fillna(0)
         pvt = (pct_change * volume).cumsum()
         return pvt
-
-    # --- NEW: DYNAMIC BEST FIT MA ---
-    def find_best_dynamic_ma(self):
-        best_ma = {"period": 0, "bounces": 0, "price": 0}
-        try:
-            close = self.df['Close']
-            low = self.df['Low']
-            
-            # Test EMAs from 20 to 200 in steps of 5
-            for p in range(20, 201, 5):
-                ema = close.ewm(span=p, adjust=False).mean()
-                
-                # Count "Bounces" (Low touches EMA but Close stays above)
-                # Tolerance: 1%
-                touches = (low <= ema * 1.01) & (low >= ema * 0.99) & (close > ema)
-                bounces = touches.sum()
-                
-                if bounces > best_ma["bounces"]:
-                    best_ma["period"] = p
-                    best_ma["bounces"] = bounces
-                    best_ma["price"] = ema.iloc[-1]
-            
-            # Only return if significant bounces found (>3 in 2 years is decent for daily)
-            if best_ma["bounces"] < 3: 
-                best_ma = {"period": 50, "bounces": 0, "price": self.df['EMA_50'].iloc[-1]} # Default fallback
-                
-        except: pass
-        return best_ma
 
     def prepare_indicators(self):
         if self.df is None or self.df.empty: return
@@ -439,7 +408,7 @@ class StockAnalyzer:
             )
             
             breakout_indices = self.df.index[signals]
-            if len(breakout_indices) < 3: 
+            if len(breakout_indices) < 3: # Relaxed min count slightly as strict rule yields fewer trades
                  return res
                  
             best_win_rate = -1
@@ -615,6 +584,29 @@ class StockAnalyzer:
                 if wr > best_res['win_rate']:
                     best_res = {"strategy": "MA Trend", "details": "Trend Following (50 > 200)", "win_rate": wr, "hold_days": days, "is_triggered_today": True}
         return best_res
+
+    # --- NEW: DYNAMIC BEST FIT MA ---
+    def find_best_dynamic_ma(self):
+        best_ma = {"period": 0, "bounces": 0, "price": 0}
+        try:
+            close = self.df['Close']
+            low = self.df['Low']
+            
+            for p in range(20, 201, 5):
+                ema = close.ewm(span=p, adjust=False).mean()
+                touches = (low <= ema * 1.01) & (low >= ema * 0.99) & (close > ema)
+                bounces = touches.sum()
+                
+                if bounces > best_ma["bounces"]:
+                    best_ma["period"] = p
+                    best_ma["bounces"] = bounces
+                    best_ma["price"] = ema.iloc[-1]
+            
+            if best_ma["bounces"] < 3: 
+                best_ma = {"period": 50, "bounces": 0, "price": self.df['EMA_50'].iloc[-1]} 
+                
+        except: pass
+        return best_ma
 
     # --- UPDATED: Fundamentals with Altman Z-Score ---
     def check_fundamentals(self):
@@ -899,6 +891,47 @@ class StockAnalyzer:
         except Exception: pass
         return res
 
+    # --- NEW: Detect Inside Bar ---
+    def detect_inside_bar(self):
+        res = {"detected": False, "high": 0, "low": 0, "msg": ""}
+        try:
+            if self.data_len < 2: return res
+            
+            curr = self.df.iloc[-1]
+            prev = self.df.iloc[-2]
+            
+            # Inside Bar Logic: High < Prev High AND Low > Prev Low
+            is_inside = (curr['High'] < prev['High']) and (curr['Low'] > prev['Low'])
+            
+            if is_inside:
+                # Check volume for "Coil" effect (low volume is better)
+                is_low_vol = curr['Volume'] < prev['Volume']
+                msg = "Inside Bar (Coil)" if is_low_vol else "Inside Bar (Volatility Contraction)"
+                
+                res = {
+                    "detected": True,
+                    "high": prev['High'], # Breakout trigger
+                    "low": prev['Low'],   # Breakdown trigger
+                    "msg": msg
+                }
+        except: pass
+        return res
+    
+    # --- NEW: Detect Stealth Accumulation ---
+    def detect_stealth_accumulation(self):
+        # Check for high volume with low price movement near recent highs
+        try:
+            if self.data_len < 2: return False
+            c0 = self.df.iloc[-1]
+            spread = c0['High'] - c0['Low']
+            avg_spread = self.df['ATR'].iloc[-1]
+            
+            # High Volume (>1.5x) + Small Spread (<0.8x ATR) + Close in upper half
+            if c0['RVOL'] > 1.5 and spread < (0.8 * avg_spread) and c0['Close'] > ((c0['High'] + c0['Low']) / 2):
+                return True
+        except: pass
+        return False
+
     def analyze_smart_money_enhanced(self):
         res = {"status": "NEUTRAL", "signals": [], "metrics": {}}
         try:
@@ -937,6 +970,10 @@ class StockAnalyzer:
             if 'PVT' in self.df.columns and len(self.df) > 5:
                 pvt_slope = self.calc_slope(self.df['PVT'], 5)
                 if pvt_slope > 0: score += 1; res['signals'].append("PVT Rising (Positive Volume Trend)")
+            
+            # New: Stealth Accumulation Check
+            if self.detect_stealth_accumulation():
+                score += 2; res['signals'].append("Stealth Accumulation (High Vol, Low Spread)")
 
             if buy_pressure > 60:
                  score += 1; res['signals'].append(f"Buying Pressure Dominant ({buy_pressure:.0f}%)")
@@ -1004,7 +1041,6 @@ class StockAnalyzer:
         valid_setups = []
         
         # 0. NEW PRIORITY: SNIPER RSI+STOCH
-        # Use the dataframe stored in the class instance
         try:
             curr_rsi = self.df['RSI'].iloc[-1]
             prev_rsi = self.df['RSI'].iloc[-2]
@@ -1024,6 +1060,16 @@ class StockAnalyzer:
                     "type": "SNIPER_MOMENTUM"
                 })
         except: pass
+
+        # 0.5. NEW: Inside Bar Breakout
+        ib = ctx.get('inside_bar', {})
+        if ib.get('detected'):
+             valid_setups.append({
+                "reason": f"PATTERN: Inside Bar Coil (Breakout > {ib['high']})",
+                "entry": ib['high'],
+                "sl": ib['low'],
+                "type": "INSIDE_BAR"
+            })
 
         # 1. Check Rectangle Breakout (Volume Thrust + Freshness)
         if rect['detected'] and "FRESH BREAKOUT" in rect['status']:
@@ -1056,7 +1102,6 @@ class StockAnalyzer:
             })
              
         # 4. Check Standard Trend Strategy (Golden Confluence)
-        # Only trigger if Trend is STRONG and Smart Money is BULLISH
         if best_strategy['is_triggered_today'] and "STRONG" in trend_status and "BULLISH" in ctx['smart_money']['status']:
             valid_setups.append({
                 "reason": f"CONFLUENCE: {best_strategy['strategy']} + Smart Money + Strong Trend",
@@ -1110,7 +1155,7 @@ class StockAnalyzer:
              entry_price = self.adjust_to_tick_size(primary_setup['entry'] * 0.995) # 0.5% discount
              final_reason += " (Limit Order)"
 
-        if current_price > entry_price and primary_setup['type'] != "BREAKOUT":
+        if current_price > entry_price and primary_setup['type'] != "BREAKOUT" and primary_setup['type'] != "INSIDE_BAR":
             entry_price = current_price
 
         stop_loss = self.adjust_to_tick_size(primary_setup['sl'])
@@ -1227,10 +1272,13 @@ class StockAnalyzer:
         
         sm = self.analyze_smart_money_enhanced()
         pat_counts = self.scan_historical_patterns()
-        weekly_trend = self.check_weekly_trend()
+        weekly_trend = self.check_weekly_trend() # Sniper: Weekly Trend Check
         
         # New: Dynamic MA
         best_ma = self.find_best_dynamic_ma()
+
+        # New: Detect Inside Bar
+        inside_bar = self.detect_inside_bar()
 
         return {
             "price": last_price, "change_pct": change_pct, 
@@ -1239,6 +1287,7 @@ class StockAnalyzer:
             "dist_support": dist_supp, "fib_levels": fibs, 
             "atr": atr, "smart_money": sm, "weekly_trend": weekly_trend,
             "best_ma": best_ma, # Added dynamic MA
+            "inside_bar": inside_bar, # Added inside bar
             "vcp": self.detect_vcp_pattern(), 
             "geo": self.detect_geometric_patterns(),
             "candle": self.detect_candle_patterns(), 
@@ -1286,5 +1335,3 @@ class StockAnalyzer:
             "rectangle": rect, "best_strategy": best_strategy,
             "is_ipo": self.data_len < 200, "days_listed": self.data_len
         }
-
-
