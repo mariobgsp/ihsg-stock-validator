@@ -9,7 +9,7 @@ def clear_screen():
 
 def print_header():
     print("="*65)
-    print("      IHSG ULTIMATE SCANNER (V3.2 - Final Hedge Fund)      ")
+    print("      IHSG ULTIMATE SCANNER (V3.3 - Probability Filter)      ")
     print("      Trend + VSA + Patterns + Smart Money + Prediction")
     print("="*65)
 
@@ -48,6 +48,7 @@ def print_report(data, balance):
     ma = data['context'].get('ma_values', {})
     symbol = "✅" if "UPTREND" in tt['status'] else "⚠️ "
     print(f"\n{symbol} TREND HEALTH")
+    # Fix: Use max_score to show correct denominator (e.g., 3/3 for IPO)
     print(f"   Status: {tt['status']} (Score: {tt['score']}/{tt.get('max_score', 6)})")
     print(f"   [EMA50: {ma.get('EMA_50', 0):,.0f}] | [EMA200: {ma.get('EMA_200', 0):,.0f}]")
     for det in tt['details']: print(f"   - {det}")
@@ -127,18 +128,29 @@ def print_report(data, balance):
         else:
             print("   [!] Stop Loss too tight or risk too high.")
 
-    # 7. CONCLUSION (New)
+    # 7. CONCLUSION (New Probability-Aware Logic)
     print(f"\n🏁 FINAL VERDICT")
     val = data['validation']
     prob = data['probability']
+    prob_val = prob['value']
     
     print(f"   Signal Strength: {val['verdict']} (Score: {val['score']})")
-    print(f"   Win Probability: {prob['verdict']} (~{prob['value']}%)")
+    print(f"   Win Probability: {prob['verdict']} (~{prob_val}%)")
     
     status = data['plan']['status']
+    
+    # --- SMART LOGIC UPDATE ---
     if "EXECUTE" in status or "EARLY ENTRY" in status:
-        print(f"\n   👉 RECOMMENDATION: WATCHLIST / BUY")
-        print(f"      Setup confirmed. Ensure Risk Management is applied.")
+        # Only recommend BUY if Probability is decent (> 60%)
+        if prob_val >= 60:
+            print(f"\n   👉 RECOMMENDATION: WATCHLIST / BUY")
+            print(f"      Setup confirmed and stats look good.")
+        else:
+            # Downgrade to RISKY if setup is good but stats are bad
+            print(f"\n   👉 RECOMMENDATION: RISKY / SPECULATIVE BUY")
+            print(f"      Setup is valid, but statistical win rate is low ({prob_val}%).")
+            print(f"      Reduce position size if you enter.")
+            
     elif "WAIT" in status:
         print(f"\n   👉 RECOMMENDATION: WAIT")
         print(f"      No valid entry yet. {data['plan']['reason']}")
@@ -152,7 +164,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('ticker', nargs='?')
     
-    parser.add_argument('--balance', type=int, default=10_000_000, help="Account Balance (IDR)")
+    parser.add_argument('--balance', type=int, default=100_000_000, help="Account Balance (IDR)")
     parser.add_argument('--risk', type=float, default=1.0, help="Risk per trade (%)")
     
     parser.add_argument('--period', default=DEFAULT_CONFIG['BACKTEST_PERIOD'], help="Data period (e.g. 1y, 2y)")
