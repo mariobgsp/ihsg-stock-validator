@@ -319,7 +319,7 @@ class StockAnalyzer:
             res["score"] = score
             if score == 6: res["status"] = "PERFECT UPTREND (Stage 2)"
             elif score >= 4: res["status"] = "STRONG UPTREND"
-            elif score == 3: res["status"] = "WEAK UPTREND / RECOVERY" # <--- Added missing Score 3
+            elif score == 3: res["status"] = "WEAK UPTREND / RECOVERY"
             elif score <= 2: res["status"] = "DOWNTREND / BASE"
             
             if c1 and c2: res["details"].append("MA Alignment (Price > 150 > 200)")
@@ -740,46 +740,63 @@ class StockAnalyzer:
                     res["action"] = "Wait for Edge"
         return res
 
-    def detect_rectangle_pattern(self):
-        res = {"detected": False, "top": 0, "bottom": 0, "msg": "No Pattern"}
-        try:
-            lookback = 45
-            if self.data_len < lookback: return res
+    # --- UPDATED: Multi-Window Rectangle Detection ---
+    def _scan_box(self, window_size):
+        res = {"detected": False, "top": 0, "bottom": 0, "msg": "No Pattern", "status": "None"}
+        if self.data_len < window_size: return res
+        
+        window = self.df.iloc[-window_size:].copy()
+        
+        # Quantile-based Box (Filters out noise wicks)
+        box_top = window['Close'].quantile(0.95)
+        box_bot = window['Close'].quantile(0.05)
+        
+        # Tightness Check (Box shouldn't be too wide)
+        height_pct = (box_top - box_bot) / box_bot
+        if height_pct > 0.25: return res
+        
+        curr = self.df['Close'].iloc[-1]
+        
+        # Status Logic
+        if curr > (box_top * 1.05): return res # Too far gone
+        if curr < (box_bot * 0.95): return res # Breakdown
+        
+        status = "INSIDE BOX"
+        if curr > box_top:
+            if curr <= (box_top * 1.03): status = "FRESH BREAKOUT"
+            else: status = "EXTENDED (Caution)"
+        elif (curr - box_bot) / (box_top - box_bot) < 0.2:
+            status = "SUPPORT BOUNCE"
             
-            window = self.df.iloc[-lookback:].copy()
-            max_p = window['High'].max()
-            min_p = window['Low'].min()
-            
-            height_pct = (max_p - min_p) / min_p
-            if height_pct > 0.25: return res
-
-            upper_bound = window['Close'].quantile(0.95)
-            lower_bound = window['Close'].quantile(0.05)
-            box_top = upper_bound
-            box_bot = lower_bound
-            
-            curr = self.df['Close'].iloc[-1]
-            
-            if curr > (box_top * 1.05): return res 
-            if curr < (box_bot * 0.95): return res
-                
-            status = ""
-            if curr > box_top:
-                if curr <= (box_top * 1.03): status = "FRESH BREAKOUT"
-                else: status = "EXTENDED (Caution)"
-            elif (curr - box_bot) / (box_top - box_bot) < 0.2:
-                status = "SUPPORT BOUNCE"
-            else:
-                status = "INSIDE BOX"
-                
-            res = {
-                "detected": True, "top": box_top, "bottom": box_bot, 
-                "height_pct": ((box_top - box_bot)/box_bot) * 100, 
-                "status": status, 
-                "msg": f"Consolidation ({box_bot:,.0f}-{box_top:,.0f})"
-            }
-        except: pass
+        res = {
+            "detected": True, 
+            "top": box_top, "bottom": box_bot, 
+            "height_pct": height_pct * 100, 
+            "status": status, 
+            "msg": f"Consolidation ({box_bot:,.0f}-{box_top:,.0f})"
+        }
         return res
+
+    def detect_rectangle_pattern(self):
+        # 1. Try Short Term (15 days) - "Micro Base" / "Flag"
+        # Priority: High
+        res_short = self._scan_box(15)
+        if res_short['detected'] and res_short['status'] != "INSIDE BOX":
+             # If actionable (Breakout/Bounce), return immediately
+             return res_short
+
+        # 2. Try Medium Term (50 days) - "Base"
+        res_med = self._scan_box(50)
+        
+        # If Short detected "Inside Box" but Medium detected "Breakout", prefer Medium
+        if res_short['detected'] and res_med['detected']:
+             if res_med['status'] == "FRESH BREAKOUT": return res_med
+             return res_short # Default to shorter pattern
+        
+        if res_short['detected']: return res_short
+        if res_med['detected']: return res_med
+        
+        return {"detected": False, "top": 0, "bottom": 0, "msg": "No Pattern", "status": "None"}
 
     def detect_candle_patterns(self):
         res = {"pattern": "None", "sentiment": "Neutral"}
