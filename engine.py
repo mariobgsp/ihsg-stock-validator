@@ -269,6 +269,25 @@ class StockAnalyzer:
                 regime = "BEARISH"
         return regime
 
+    # --- UPDATED: Weekly Trend Check (Sniper Optimization) ---
+    def check_weekly_trend(self):
+        try:
+            # Resample daily data to weekly
+            logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
+            weekly_df = self.df.resample('W').apply(logic).dropna()
+            
+            if len(weekly_df) < 30: return "UNKNOWN"
+
+            # Simple Weekly EMA 30 (equivalent to Daily 150)
+            weekly_df['EMA_30'] = weekly_df['Close'].ewm(span=30, adjust=False).mean()
+            
+            curr = weekly_df['Close'].iloc[-1]
+            ema = weekly_df['EMA_30'].iloc[-1]
+            
+            if curr > ema: return "UPTREND"
+            return "DOWNTREND"
+        except: return "UNKNOWN"
+
     def check_trend_template(self):
         res = {"status": "FAIL", "score": 0, "max_score": 6, "details": []}
         try:
@@ -563,7 +582,6 @@ class StockAnalyzer:
                     best_res = {"strategy": "MA Trend", "details": "Trend Following (50 > 200)", "win_rate": wr, "hold_days": days, "is_triggered_today": True}
         return best_res
 
-    # --- UPDATED: Fundamentals with Altman Z-Score ---
     def check_fundamentals(self):
         res = {"market_cap": 0, "eps": 0, "pe": 0, "roe": 0, "pbv": 0, "status": "Unknown", "warning": "", "z_score": "N/A"}
         try:
@@ -747,16 +765,19 @@ class StockAnalyzer:
         
         window = self.df.iloc[-window_size:].copy()
         
+        # Quantile-based Box (Filters out noise wicks)
         box_top = window['Close'].quantile(0.95)
         box_bot = window['Close'].quantile(0.05)
         
+        # Tightness Check (Box shouldn't be too wide)
         height_pct = (box_top - box_bot) / box_bot
         if height_pct > 0.25: return res
         
         curr = self.df['Close'].iloc[-1]
         
-        if curr > (box_top * 1.05): return res 
-        if curr < (box_bot * 0.95): return res 
+        # Status Logic
+        if curr > (box_top * 1.05): return res # Too far gone
+        if curr < (box_bot * 0.95): return res # Breakdown
         
         status = "INSIDE BOX"
         if curr > box_top:
@@ -775,15 +796,20 @@ class StockAnalyzer:
         return res
 
     def detect_rectangle_pattern(self):
+        # 1. Try Short Term (15 days) - "Micro Base" / "Flag"
+        # Priority: High
         res_short = self._scan_box(15)
         if res_short['detected'] and res_short['status'] != "INSIDE BOX":
+             # If actionable (Breakout/Bounce), return immediately
              return res_short
 
+        # 2. Try Medium Term (50 days) - "Base"
         res_med = self._scan_box(50)
         
+        # If Short detected "Inside Box" but Medium detected "Breakout", prefer Medium
         if res_short['detected'] and res_med['detected']:
              if res_med['status'] == "FRESH BREAKOUT": return res_med
-             return res_short 
+             return res_short # Default to shorter pattern
         
         if res_short['detected']: return res_short
         if res_med['detected']: return res_med
@@ -924,6 +950,7 @@ class StockAnalyzer:
         else: tick = 25
         return round(price / tick) * tick
 
+    # --- UPDATED: Sniper Edition Trade Plan ---
     def calculate_trade_plan_hybrid(self, ctx, trend_status, best_strategy, rect):
         # Default Plan
         plan = {
@@ -941,20 +968,23 @@ class StockAnalyzer:
         # Container for valid setups
         valid_setups = []
         
-        # 1. Check Rectangle Breakout
+        # 1. Check Rectangle Breakout (Volume Thrust + Freshness)
         if rect['detected'] and "FRESH BREAKOUT" in rect['status']:
-            valid_setups.append({
-                "reason": f"MOMENTUM: Box Breakout (Rp {rect['top']:,.0f})",
-                "entry": rect['top'], # Breakout level
-                "sl": rect['top'] - atr,
-                "type": "BREAKOUT"
-            })
+             # Check Volume Thrust (Current Vol > 1.5x Avg) - Simplification: Use RVOL
+             rvol = self.df['RVOL'].iloc[-1]
+             if rvol > 1.5:
+                 valid_setups.append({
+                    "reason": f"SNIPER: High Vol Breakout (Rp {rect['top']:,.0f})",
+                    "entry": rect['top'], 
+                    "sl": rect['top'] - atr,
+                    "type": "BREAKOUT"
+                })
 
         # 2. Check Rectangle Support Bounce
         if rect['detected'] and abs(current_price - rect['bottom'])/rect['bottom'] < 0.02:
             valid_setups.append({
                 "reason": f"VALUE: Box Support Bounce (Rp {rect['bottom']:,.0f})",
-                "entry": rect['bottom'], # Support level
+                "entry": rect['bottom'], 
                 "sl": rect['bottom'] - (atr * 0.5),
                 "type": "SUPPORT"
             })
@@ -968,16 +998,17 @@ class StockAnalyzer:
                 "type": "EARLY_ENTRY"
             })
              
-        # 4. Check Standard Trend Strategy
-        if best_strategy['is_triggered_today'] and "UPTREND" in trend_status:
+        # 4. Check Standard Trend Strategy (Golden Confluence)
+        # Only trigger if Trend is STRONG and Smart Money is BULLISH
+        if best_strategy['is_triggered_today'] and "STRONG" in trend_status and "BULLISH" in ctx['smart_money']['status']:
             valid_setups.append({
-                "reason": f"STRATEGY: {best_strategy['strategy']} in Uptrend",
+                "reason": f"CONFLUENCE: {best_strategy['strategy']} + Smart Money + Strong Trend",
                 "entry": current_price,
                 "sl": current_price - (atr * 2.5),
                 "type": "TREND"
             })
 
-        # 5. Check Channel Support (New Geometry)
+        # 5. Check Channel Support
         geo = ctx['geo']
         if geo['pattern'] != "None" and "Channel" in geo['pattern'] and "Support" in geo.get('prediction', ''):
              valid_setups.append({
@@ -989,7 +1020,7 @@ class StockAnalyzer:
 
         # --- DECISION LOGIC ---
         if not valid_setups:
-            # Handle the "Close to Resistance" warning if no other buy signal exists
+            # Handle the "Close to Resistance" warning
             if rect['detected'] and rect['status'] == "INSIDE BOX":
                  dist_to_top = (rect['top'] - current_price) / current_price
                  if dist_to_top < 0.03:
@@ -998,24 +1029,22 @@ class StockAnalyzer:
                      plan["reason"] = "No valid entry inside box. Wait for support or breakout."
             return plan
 
-        # If we have valid setups, combine them
-        # We prioritize the setup with the highest Entry price (to catch momentum) 
-        # OR strictly follow a priority list. Let's just combine reasons.
-        
-        primary_setup = valid_setups[0] # Default to the first found (highest priority based on code order)
-        
+        primary_setup = valid_setups[0]
         combined_reasons = [s['reason'] for s in valid_setups]
         final_reason = " + ".join(combined_reasons)
         
-        # Calculate Final Plan values based on the Primary Setup
+        # Calculate Entry
         entry_price = self.adjust_to_tick_size(primary_setup['entry'])
-        # If current price is higher than calculated entry (e.g. Breakout), use current price to be realistic
-        if current_price > entry_price:
+        
+        # Pullback Logic: If entry is breakout, suggest Limit slightly below
+        if primary_setup['type'] == "BREAKOUT":
+             entry_price = self.adjust_to_tick_size(primary_setup['entry'] * 0.995) # 0.5% discount
+             final_reason += " (Limit Order)"
+
+        if current_price > entry_price and primary_setup['type'] != "BREAKOUT":
             entry_price = current_price
 
         stop_loss = self.adjust_to_tick_size(primary_setup['sl'])
-        
-        # Safety: Ensure Stop Loss is below Entry
         if stop_loss >= entry_price:
             stop_loss = self.adjust_to_tick_size(entry_price - atr)
 
@@ -1026,11 +1055,8 @@ class StockAnalyzer:
             plan['reason'] = final_reason
             plan['entry'] = entry_price
             plan['stop_loss'] = stop_loss
-            
-            # Target 3R
             plan['take_profit'] = self.adjust_to_tick_size(entry_price + (risk * 3.0))
             
-            # Sizing
             lots, risk_amt = self.calculate_position_size(plan['entry'], plan['stop_loss'])
             plan['lots'] = lots
             plan['risk_amt'] = risk_amt
@@ -1126,13 +1152,14 @@ class StockAnalyzer:
         
         sm = self.analyze_smart_money_enhanced()
         pat_counts = self.scan_historical_patterns()
-        
+        weekly_trend = self.check_weekly_trend() # Sniper: Weekly Trend Check
+
         return {
             "price": last_price, "change_pct": change_pct, 
             "ma_values": ma_values, "pattern_counts": pat_counts, 
             "support": support, "resistance": resistance,
             "dist_support": dist_supp, "fib_levels": fibs, 
-            "atr": atr, "smart_money": sm, 
+            "atr": atr, "smart_money": sm, "weekly_trend": weekly_trend,
             "vcp": self.detect_vcp_pattern(), 
             "geo": self.detect_geometric_patterns(),
             "candle": self.detect_candle_patterns(), 
@@ -1149,6 +1176,25 @@ class StockAnalyzer:
             "fib_stats": self.backtest_fib_bounce(),
             "ma_stats": self.backtest_ma_support_all()
         }
+
+    # --- NEW: Weekly Trend Check ---
+    def check_weekly_trend(self):
+        try:
+            # Resample daily data to weekly
+            logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
+            weekly_df = self.df.resample('W').apply(logic).dropna()
+            
+            if len(weekly_df) < 30: return "UNKNOWN"
+
+            # Simple Weekly EMA 30
+            weekly_df['EMA_30'] = weekly_df['Close'].ewm(span=30, adjust=False).mean()
+            
+            curr = weekly_df['Close'].iloc[-1]
+            ema = weekly_df['EMA_30'].iloc[-1]
+            
+            if curr > ema: return "UPTREND"
+            return "DOWNTREND"
+        except: return "UNKNOWN"
 
     def generate_final_report(self):
         if not self.fetch_data(): return None
