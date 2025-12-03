@@ -43,7 +43,7 @@ jobs:
 
     # analyze bandar
     - name: Analyze Bandar 1
-      run: python bandar_detector.py ELSA.JK
+      run: python bandar_detector.py DATA.JK
     - name: Analyze Bandar 2
       run: python bandar_detector.py MBMA.JK
     - name: Analyze Bandar 3
