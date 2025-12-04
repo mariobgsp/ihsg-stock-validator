@@ -4,7 +4,7 @@ on:
   push:
     branches: 
       - "run-analysis"
-      - "main"
+      - "run-bandar-analysis"
     paths:
       - '**.py'             
       - 'requirements.txt'   
@@ -28,9 +28,6 @@ jobs:
       run: |
         python -m pip install --upgrade pip setuptools wheel
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
-    # - name: Analyze BBCA (Standard)
-    #   run: python main.py BBCA
 
     # Analyze with Custom Flag
     - name: Analyze Stock 1
