@@ -10,7 +10,7 @@ def clear_screen():
 def print_header():
     print("="*65)
     print("      IHSG ULTIMATE SCANNER (V3.4 - Sniper Edition)      ")
-    print("      Precision Entry + Multi-Timeframe + Smart Money")
+    print("      Precision Entry + Multi-Timeframe + Smart Money + AI")
     print("="*65)
 
 def print_report(data, balance):
@@ -76,6 +76,17 @@ def print_report(data, balance):
         print(f"   Big Moves: {g_spikes} Accumulation Days vs {r_spikes} Distribution Days")
 
     for s in sm['signals']: print(f"   - {s}")
+    
+    # --- NEW: AI PREDICTION ---
+    ml = data['context'].get('ml_prediction', {})
+    print(f"\n🤖 AI / MACHINE LEARNING (Random Forest)")
+    if ml.get('prediction') == "N/A":
+         print(f"   Status: Insufficient Data")
+    else:
+        conf = ml.get('confidence', 0)
+        emoji = "🚀" if conf > 60 else "🐻" if conf < 40 else "⚖️"
+        print(f"   Forecast:   {emoji} {ml.get('prediction')} ({conf:.1f}% Confidence)")
+        print(f"   Logic:      {ml.get('msg')}")
 
     # 5. PATTERNS & PREDICTION (New & Improved)
     print(f"\n💎 PATTERN ANALYSIS & PREDICTION")
@@ -133,8 +144,8 @@ def print_report(data, balance):
         print(f"\n   --- POSITION SIZING (Bal: {balance/1e6:.0f} Jt) ---")
         if plan.get('lots', 0) > 0:
             print(f"   🛒 BUY:      {plan['lots']} LOTS")
-            print(f"   💰 Capital:  Rp {plan['lots'] * 100 * plan['entry']:,.0f}")
-            print(f"   🔥 Risk:     Rp {plan['risk_amt']:,.0f} ({DEFAULT_CONFIG['RISK_PER_TRADE_PCT']}%)")
+            print(f"   � Capital:  Rp {plan['lots'] * 100 * plan['entry']:,.0f}")
+            print(f"   �🔥 Risk:     Rp {plan['risk_amt']:,.0f} ({DEFAULT_CONFIG['RISK_PER_TRADE_PCT']}%)")
         else:
             print("   [!] Stop Loss too tight or risk too high.")
 
@@ -172,7 +183,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('ticker', nargs='?')
     
-    parser.add_argument('--balance', type=int, default=100_000_000, help="Account Balance (IDR)")
+    parser.add_argument('--balance', type=int, default=1000000, help="Account Balance (IDR)")
     parser.add_argument('--risk', type=float, default=1.0, help="Risk per trade (%)")
     
     parser.add_argument('--period', default=DEFAULT_CONFIG['BACKTEST_PERIOD'], help="Data period (e.g. 1y, 2y)")
@@ -208,5 +219,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
