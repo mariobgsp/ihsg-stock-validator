@@ -7,6 +7,9 @@ import requests
 from bs4 import BeautifulSoup
 from textblob import TextBlob
 from datetime import datetime, timedelta
+# --- NEW: Sklearn Imports ---
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 
 # ==========================================
 # 1. DEFAULT CONFIGURATION
@@ -1241,6 +1244,51 @@ class StockAnalyzer:
         if score >= 5: verdict = "ELITE SWING SETUP"
         elif score >= 3: verdict = "MODERATE"
         return score, verdict, reasons
+    
+    # --- NEW: MACHINE LEARNING MODULE ---
+    def predict_machine_learning(self):
+        try:
+            if self.data_len < 100: return {"confidence": 0.0, "prediction": "N/A", "msg": "Insufficient Data for AI"}
+            
+            # 1. Feature Engineering
+            ml_df = self.df.copy()
+            ml_df['Target'] = (ml_df['Close'].shift(-5) > ml_df['Close']).astype(int) # Predict if price is higher in 5 days
+            
+            # Use safe features (Oscillators, Ratios) - NOT raw prices
+            features = ['RSI', 'CMF', 'MFI', 'ATR', 'RVOL', 'Close', 'EMA_50']
+            
+            # Normalize Price vs EMA
+            ml_df['Dist_EMA50'] = (ml_df['Close'] - ml_df['EMA_50']) / ml_df['EMA_50']
+            ml_df['Price_Change'] = ml_df['Close'].pct_change()
+            
+            model_features = ['RSI', 'CMF', 'MFI', 'RVOL', 'Dist_EMA50', 'Price_Change']
+            ml_df = ml_df.dropna()
+            
+            if len(ml_df) < 50: return {"confidence": 0.0, "prediction": "N/A", "msg": "Data clean failed"}
+
+            X = ml_df[model_features].iloc[:-5] # All data except last 5 (no target)
+            y = ml_df['Target'].iloc[:-5]
+            
+            # 2. Train Model (Random Forest)
+            # n_estimators=100 (100 trees), random_state=42 (reproducible)
+            clf = RandomForestClassifier(n_estimators=100, min_samples_split=10, random_state=42)
+            clf.fit(X, y)
+            
+            # 3. Predict on Current Data
+            last_row = ml_df[model_features].iloc[-1:].values
+            prediction = clf.predict(last_row)[0]
+            probability = clf.predict_proba(last_row)[0][1] # Probability of Class 1 (Up)
+            
+            conf_pct = probability * 100
+            sentiment = "BULLISH" if conf_pct > 50 else "BEARISH"
+            
+            return {
+                "confidence": conf_pct,
+                "prediction": sentiment,
+                "msg": f"AI forecasts {sentiment} movement (5 Days)"
+            }
+        except Exception as e:
+            return {"confidence": 0.0, "prediction": "Error", "msg": str(e)}
 
     def get_market_context(self):
         last_price = self.df['Close'].iloc[-1]
@@ -1302,7 +1350,8 @@ class StockAnalyzer:
             "breakout_behavior": self.backtest_volume_breakout_behavior(),
             "lc_stats": self.backtest_low_cheat_performance(), 
             "fib_stats": self.backtest_fib_bounce(),
-            "ma_stats": self.backtest_ma_support_all()
+            "ma_stats": self.backtest_ma_support_all(),
+            "ml_prediction": self.predict_machine_learning() # --- Added ML Call Here
         }
 
     def generate_final_report(self):

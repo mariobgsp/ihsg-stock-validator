@@ -5,3 +5,4 @@ textblob
 requests
 beautifulsoup4
 lxml
+scikit-learn
