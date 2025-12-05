@@ -7,8 +7,8 @@ import requests
 from bs4 import BeautifulSoup
 from textblob import TextBlob
 from datetime import datetime, timedelta
-# --- NEW: Sklearn Imports ---
-from sklearn.ensemble import RandomForestClassifier
+# --- NEW: Sklearn Imports (Changed to Gradient Boosting) ---
+from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import train_test_split
 
 # ==========================================
@@ -1245,7 +1245,7 @@ class StockAnalyzer:
         elif score >= 3: verdict = "MODERATE"
         return score, verdict, reasons
     
-    # --- NEW: MACHINE LEARNING MODULE ---
+    # --- NEW: MACHINE LEARNING MODULE (GRADIENT BOOSTING) ---
     def predict_machine_learning(self):
         try:
             if self.data_len < 100: return {"confidence": 0.0, "prediction": "N/A", "msg": "Insufficient Data for AI"}
@@ -1269,9 +1269,9 @@ class StockAnalyzer:
             X = ml_df[model_features].iloc[:-5] # All data except last 5 (no target)
             y = ml_df['Target'].iloc[:-5]
             
-            # 2. Train Model (Random Forest)
-            # n_estimators=100 (100 trees), random_state=42 (reproducible)
-            clf = RandomForestClassifier(n_estimators=100, min_samples_split=10, random_state=42)
+            # 2. Train Model (Gradient Boosting Classifier)
+            # Replaced RandomForestClassifier with GradientBoostingClassifier
+            clf = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42)
             clf.fit(X, y)
             
             # 3. Predict on Current Data
@@ -1384,3 +1384,6 @@ class StockAnalyzer:
             "rectangle": rect, "best_strategy": best_strategy,
             "is_ipo": self.data_len < 200, "days_listed": self.data_len
         }
+
+
+
