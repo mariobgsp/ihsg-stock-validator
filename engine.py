@@ -35,6 +35,8 @@ DEFAULT_CONFIG = {
 }
 
 MA_TEST_PAIRS = [(5, 20), (20, 50), (50, 200)] 
+STOCH_K_PERIOD = 14
+STOCH_D_PERIOD = 3
 STOCH_OVERSOLD = 20
 OBV_LOOKBACK_DAYS = 10
 TREND_EMA_DEFAULT = 200
@@ -1013,6 +1015,60 @@ class StockAnalyzer:
         
         return best_stoch
 
+    # --- NEW: DYNAMIC RSI OPTIMIZATION ---
+    def find_best_rsi_settings(self):
+        """
+        Iterates through different RSI periods and levels to find the most profitable configuration.
+        """
+        best_rsi = {"period": 14, "lower": 30, "win_rate": 0, "score": 0}
+        # Candidates: (Period, Oversold Level)
+        candidates = [(7, 30), (14, 30), (21, 30), (9, 25), (14, 40)] # Testing different sensitivities
+
+        try:
+            hist_len = min(250, self.data_len)
+            start_idx = self.data_len - hist_len
+            close_np = self.df['Close'].values
+            high_np = self.df['High'].values
+
+            for period, lower_level in candidates:
+                # Calc RSI manually/quickly
+                delta = pd.Series(close_np).diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+                rs = gain / loss
+                # Handle division by zero
+                rs = rs.replace([np.inf, -np.inf], 0).fillna(0)
+                rsi_arr = (100 - (100 / (1 + rs))).values
+
+                # Signal: RSI crosses BACK UP above lower_level (Reversal)
+                # Logic: RSI[i] > lower AND RSI[i-1] < lower
+                
+                prev_rsi = np.roll(rsi_arr, 1)
+                signals = (rsi_arr > lower_level) & (prev_rsi < lower_level)
+                
+                sig_indices = np.where(signals)[0]
+                valid_indices = sig_indices[(sig_indices >= start_idx) & (sig_indices < self.data_len - 5)]
+
+                if len(valid_indices) < 2: continue
+
+                wins = 0
+                valid_count = 0
+                
+                for idx in valid_indices:
+                    entry = close_np[idx]
+                    future_high = np.max(high_np[idx+1 : idx+6])
+                    if future_high > entry * 1.02: # 2% target
+                        wins += 1
+                    valid_count += 1
+                
+                if valid_count > 0:
+                    wr = (wins / valid_count) * 100
+                    score = wr * np.log(valid_count + 1)
+                    if score > best_rsi["score"]:
+                        best_rsi = {"period": period, "lower": lower_level, "win_rate": wr, "score": score}
+        except: pass
+        return best_rsi
+
     # --- UPDATED: Fundamentals with Altman Z-Score ---
     def check_fundamentals(self):
         res = {"market_cap": 0, "eps": 0, "pe": 0, "roe": 0, "pbv": 0, "status": "Unknown", "warning": "", "z_score": "N/A"}
@@ -1392,7 +1448,6 @@ class StockAnalyzer:
             d_pd = best_stoch.get('d', 3)
             
             # Need to recalculate if not standard 14,3 (which is pre-calc)
-            # For efficiency in decision phase, we re-calc last 2 points
             if k_pd != 14:
                 k, d = self.calc_stoch(self.df['High'], self.df['Low'], self.df['Close'], k_pd, d_pd)
                 curr_k = k.iloc[-1]
@@ -1475,6 +1530,31 @@ class StockAnalyzer:
                     "sl": ma_price - (atr * 1.5),
                     "type": "DYNAMIC_MA"
                 })
+        
+        # 6. Dynamic RSI Setup (NEW)
+        best_rsi = ctx.get('best_rsi', {})
+        if best_rsi.get('score', 0) > 0:
+            # Need current dynamic RSI val
+            try:
+                # Re-calc manually for signal check
+                delta = pd.Series(self.df['Close'].values).diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=best_rsi['period']).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=best_rsi['period']).mean()
+                rs = gain / loss
+                rs = rs.replace([np.inf, -np.inf], 0).fillna(0)
+                rsi_val = 100 - (100 / (1 + rs))
+                
+                curr_dyn_rsi = rsi_val.iloc[-1]
+                prev_dyn_rsi = rsi_val.iloc[-2]
+                
+                if curr_dyn_rsi > best_rsi['lower'] and prev_dyn_rsi < best_rsi['lower']:
+                     valid_setups.append({
+                        "reason": f"SNIPER: Dynamic RSI ({best_rsi['period']}) Reversal from {best_rsi['lower']}",
+                        "entry": current_price,
+                        "sl": current_price - (atr * 2.0),
+                        "type": "DYNAMIC_RSI"
+                    })
+            except: pass
 
         # --- DECISION LOGIC ---
         if not valid_setups:
@@ -1852,7 +1932,8 @@ class StockAnalyzer:
             "hurst": self.calc_hurst(self.df['Close']), # --- NEW: Hurst
             "rs_score": self.calc_relative_strength_score(), # --- NEW: RS Score
             "mc_sim": self.simulate_monte_carlo(self.optimize_stock(1, 60)), # --- NEW: Monte Carlo
-            "best_stoch": self.find_best_stoch_settings() # --- NEW: Dynamic Stoch
+            "best_stoch": self.find_best_stoch_settings(), # --- NEW: Dynamic Stoch
+            "best_rsi": self.find_best_rsi_settings() # --- NEW: Dynamic RSI
         }
 
     def generate_final_report(self):
@@ -1884,5 +1965,3 @@ class StockAnalyzer:
             "best_strategy": best_strategy,
             "is_ipo": self.data_len < 200, "days_listed": self.data_len
         }
-
-
