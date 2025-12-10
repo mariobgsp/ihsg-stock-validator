@@ -214,6 +214,8 @@ class StockAnalyzer:
             # Simplified R/S analysis for efficiency
             lags = range(2, max_lag)
             tau = [np.std(series.diff(lag)) for lag in lags]
+            # Avoid log(0)
+            tau = [t if t > 0 else 0.000001 for t in tau]
             poly = np.polyfit(np.log(lags), np.log(tau), 1)
             return poly[0] * 2.0 
         except: return 0.5
@@ -221,11 +223,7 @@ class StockAnalyzer:
     # --- NEW: Relative Strength vs Market ---
     def calc_relative_strength_score(self):
         try:
-            if self.market_df is None or len(self.market_df) < 100: return 0
-            
-            # Use 3M, 6M, 12M lookbacks
-            periods = [63, 126, 252]
-            score = 0
+            if self.market_df is None or len(self.market_df) < 100: return 50
             
             stock_close = self.df['Close']
             market_close = self.market_df['Close']
@@ -233,20 +231,22 @@ class StockAnalyzer:
             # Align dates
             aligned = pd.concat([stock_close, market_close], axis=1, keys=['Stock', 'Market']).dropna()
             
-            if len(aligned) < 252: return 50 # Neutral default
+            if len(aligned) < 252: return 50 
             
             s = aligned['Stock']
             m = aligned['Market']
             
-            # Calculate ROC for each period
-            roc3 = (s.iloc[-1] / s.iloc[-63]) / (m.iloc[-1] / m.iloc[-63])
-            roc6 = (s.iloc[-1] / s.iloc[-126]) / (m.iloc[-1] / m.iloc[-126])
-            roc12 = (s.iloc[-1] / s.iloc[-252]) / (m.iloc[-1] / m.iloc[-252])
+            # ROC with safety check for zero
+            def safe_roc(series, period):
+                if series.iloc[-period] == 0: return 1.0
+                return series.iloc[-1] / series.iloc[-period]
+
+            roc3 = safe_roc(s, 63) / safe_roc(m, 63)
+            roc6 = safe_roc(s, 126) / safe_roc(m, 126)
+            roc12 = safe_roc(s, 252) / safe_roc(m, 252)
             
-            # Weighted Score (More weight on recent 3M)
-            # > 1.0 means outperforming
             rs_val = (roc3 * 0.4) + (roc6 * 0.3) + (roc12 * 0.3)
-            return round(rs_val * 100, 1) # Return as index (100 = Neutral)
+            return round(rs_val * 100, 1) 
             
         except: return 50
 
@@ -1721,3 +1721,5 @@ class StockAnalyzer:
             "best_strategy": best_strategy,
             "is_ipo": self.data_len < 200, "days_listed": self.data_len
         }
+
+
