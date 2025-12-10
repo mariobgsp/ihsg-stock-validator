@@ -184,6 +184,8 @@ def print_report(data, balance):
             print(f"   1R Target:   {p['1R']:.1f}%")
             print(f"   2R Target:   {p['2R']:.1f}%")
             print(f"   3R Target:   {p['3R']:.1f}%")
+            print(f"   4R Target:   {p['4R']:.1f}%")
+            print(f"   5R Target:   {p['5R']:.1f}%")
             print(f"   Stop Loss:   {p['Stop Loss']:.1f}%")
 
     # 7. CONCLUSION (Probability-Aware)
