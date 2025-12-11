@@ -8,14 +8,14 @@ from bs4 import BeautifulSoup
 from textblob import TextBlob
 from datetime import datetime, timedelta
 # --- XGBoost Imports ---
-from xgboost import XGBRegressor # Keep Regressor for Support Level
+from xgboost import XGBClassifier, XGBRegressor
 from sklearn.model_selection import train_test_split
 
 # ==========================================
 # 1. DEFAULT CONFIGURATION
 # ==========================================
 DEFAULT_CONFIG = {
-    "BACKTEST_PERIOD": "3y",
+    "BACKTEST_PERIOD": "2y",
     "MAX_HOLD_DAYS": 60,
     "FIB_LOOKBACK_DAYS": 120,
     "RSI_PERIOD": 14,
@@ -77,8 +77,12 @@ class StockAnalyzer:
 
     def fetch_data(self):
         try:
-            # FETCH 5 YEARS (ML_PERIOD) for ML context
-            period = "5y" 
+            period = self.config["BACKTEST_PERIOD"]
+            # Ensure at least 2y for valid ML/Quant metrics
+            if "y" in period:
+                 y = int(period.replace("y",""))
+                 if y < 2: period = "2y"
+            
             self.df = yf.download(self.ticker, period=period, progress=False, auto_adjust=True, multi_level_index=False)
             try:
                 self.market_df = yf.download(self.market_ticker, period=period, progress=False, auto_adjust=True, multi_level_index=False)
@@ -150,7 +154,9 @@ class StockAnalyzer:
         y = series.iloc[-period:].values
         x = np.arange(len(y))
         try:
-            slope, _ = np.polyfit(x, y, 1)
+            # Normalize
+            y_norm = (y - np.mean(y)) / (np.std(y) + 1e-9)
+            slope, _ = np.polyfit(x, y_norm, 1)
             return slope
         except: return 0
 
@@ -207,10 +213,9 @@ class StockAnalyzer:
         pvt = (pct_change * volume).cumsum()
         return pvt
 
-    # --- NEW: HURST EXPONENT (Regime Filter) ---
+    # --- HURST EXPONENT (Regime Filter) ---
     def calc_hurst(self, series, max_lag=20):
         try:
-            # Simplified R/S analysis for efficiency
             lags = range(2, max_lag)
             tau = [np.std(series.diff(lag)) for lag in lags]
             # Avoid log(0)
@@ -219,7 +224,7 @@ class StockAnalyzer:
             return poly[0] * 2.0 
         except: return 0.5
 
-    # --- NEW: Relative Strength vs Market ---
+    # --- Relative Strength vs Market ---
     def calc_relative_strength_score(self):
         try:
             if self.market_df is None or len(self.market_df) < 100: return 50
@@ -227,15 +232,12 @@ class StockAnalyzer:
             stock_close = self.df['Close']
             market_close = self.market_df['Close']
             
-            # Align dates
             aligned = pd.concat([stock_close, market_close], axis=1, keys=['Stock', 'Market']).dropna()
-            
             if len(aligned) < 252: return 50 
             
             s = aligned['Stock']
             m = aligned['Market']
             
-            # ROC with safety check for zero
             def safe_roc(series, period):
                 if series.iloc[-period] == 0: return 1.0
                 return series.iloc[-1] / series.iloc[-period]
@@ -246,7 +248,6 @@ class StockAnalyzer:
             
             rs_val = (roc3 * 0.4) + (roc6 * 0.3) + (roc12 * 0.3)
             return round(rs_val * 100, 1) 
-            
         except: return 50
 
     def prepare_indicators(self):
@@ -261,7 +262,6 @@ class StockAnalyzer:
 
         self.df['RSI'] = self.calc_rsi(self.df['Close'], self.config["RSI_PERIOD"])
         
-        # --- NEW: Dynamic Stoch Init (Use default for now, override later) ---
         k, d = self.calc_stoch(self.df['High'], self.df['Low'], self.df['Close'], 14, 3)
         self.df[f"STOCHk"] = k
         self.df[f"STOCHd"] = d
@@ -497,7 +497,7 @@ class StockAnalyzer:
                     
         return best_res
 
-    # --- NEW: MONTE CARLO SIMULATION ---
+    # --- MONTE CARLO SIMULATION ---
     def simulate_monte_carlo(self, best_strategy):
         """
         Runs a Monte Carlo simulation based on the backtested win rate and avg returns.
@@ -546,7 +546,7 @@ class StockAnalyzer:
         except: pass
         return res
 
-    # --- NEW: CALCULATE TARGET PROBABILITIES ---
+    # --- CALCULATE TARGET PROBABILITIES ---
     def calculate_target_probabilities(self, entry_price, stop_loss_price, atr):
         """
         Calculates the probability of hitting 1R, 2R, 3R, 4R, 5R targets and the stop loss.
@@ -1188,668 +1188,68 @@ class StockAnalyzer:
         
         return best_rsi
 
-    # --- UPDATED: Fundamentals with Altman Z-Score ---
-    def check_fundamentals(self):
-        res = {"market_cap": 0, "eps": 0, "pe": 0, "roe": 0, "pbv": 0, "status": "Unknown", "warning": "", "z_score": "N/A"}
+    # --- NEW: DETECT DIVERGENCE WITH DURATION (OBV & ACCUMULATION) ---
+    def detect_smart_money_divergence(self):
+        """
+        Detects if Price is making Lower Lows while OBV is making Higher Lows (Bullish Divergence).
+        Also calculates how long this divergence has been building.
+        """
+        res = {"detected": False, "msg": "", "duration": 0}
         try:
-            mcap = self.info.get('marketCap', 0)
-            eps = self.info.get('trailingEps', 0)
+            if self.data_len < 60: return res
             
-            res['market_cap'] = mcap
-            res['eps'] = eps
-            res['pe'] = self.info.get('trailingPE', 0)
-            res['roe'] = self.info.get('returnOnEquity', 0)
-            res['pbv'] = self.info.get('priceToBook', 0)
-
-            # PBV Fix: Calculate manually if data is suspicious
-            if (res['pbv'] > 50 or res['pbv'] == 0) and res['pe'] > 0 and res['roe'] > 0:
-                res['pbv'] = res['pe'] * res['roe']
-
-            total_debt = self.info.get('totalDebt', 0)
-            total_cash = self.info.get('totalCash', 0)
-            if total_debt > 0 and total_cash > 0:
-                curr_ratio = self.info.get('currentRatio', 0)
-                if curr_ratio < 1.0:
-                    res['z_score'] = "DISTRESS ZONE (High Risk)"
-                elif total_debt > (3 * total_cash):
-                    res['z_score'] = "GREY ZONE (High Debt)"
-                else:
-                    res['z_score'] = "SAFE ZONE"
-
-            min_cap = self.config["MIN_MARKET_CAP"]
-            if mcap == 0: res['status'] = "Unknown (Data Missing)"
-            elif mcap < min_cap: res['status'] = "SMALL CAP (High Risk)"; res['warning'] = "Market Cap < 500B IDR."
-            elif eps < 0: res['status'] = "UNPROFITABLE"; res['warning'] = "Company has negative Earnings Per Share."
-            else: res['status'] = "GOOD"
-        except Exception: pass
-        return res
-
-    def detect_ttm_squeeze(self):
-        res = {"detected": False, "msg": ""}
-        try:
-            if self.data_len < 20: return res
-            # Use last values only for detection
-            c = self.df['Close']
-            sma20 = c.rolling(20).mean().iloc[-1]
-            std20 = c.rolling(20).std().iloc[-1]
-            upper_bb = sma20 + (2.0 * std20)
-            lower_bb = sma20 - (2.0 * std20)
+            # Use last 60 days
+            window = 60
+            close = self.df['Close'].iloc[-window:]
+            obv = self.df['OBV'].iloc[-window:]
             
-            atr20 = self.df['ATR'].iloc[-1] # Assuming ATR already calc
-            upper_kc = sma20 + (1.5 * atr20)
-            lower_kc = sma20 - (1.5 * atr20)
+            # Simple Regression Slope over rolling windows to find sustained divergence
+            # We look for a period where Price Slope < 0 and OBV Slope > 0
             
-            is_squeeze = (upper_bb < upper_kc) and (lower_bb > lower_kc)
-            if is_squeeze: res = {"detected": True, "msg": "TTM Squeeze ON! Massive breakout imminent."}
-        except Exception: pass
-        return res
-
-    def calculate_pivot_points(self):
-        pivots = {"P": 0, "R1": 0, "S1": 0}
-        try:
-            if self.data_len < 2: return pivots
-            prev = self.df.iloc[-2] 
-            high, low, close = prev['High'], prev['Low'], prev['Close']
-            p = (high + low + close) / 3
-            r1 = (2 * p) - low
-            s1 = (2 * p) - high
-            pivots = {"P": p, "R1": r1, "S1": s1}
-        except Exception: pass
-        return pivots
-
-    def detect_vcp_pattern(self):
-        try:
-            if self.data_len < 60: return {"detected": False, "msg": "Insufficient Data"}
-            recent_df = self.df[-60:].copy()
-            recent_df['is_peak'] = recent_df['High'] == recent_df['High'].rolling(window=5, center=True).max()
-            peaks = recent_df[recent_df['is_peak']]
-            recent_df['is_trough'] = recent_df['Low'] == recent_df['Low'].rolling(window=5, center=True).min()
-            troughs = recent_df[recent_df['is_trough']]
-            if len(peaks) < 2 or len(troughs) < 2: return {"detected": False, "msg": "No clear Swing Pattern"}
-            last_peak_price = peaks['High'].iloc[-1]
-            prev_peak_price = peaks['High'].iloc[-2]
-            last_trough_price = troughs['Low'].iloc[-1]
-            prev_trough_price = troughs['Low'].iloc[-2]
-            depth_1 = (prev_peak_price - prev_trough_price) / prev_peak_price
-            depth_2 = (last_peak_price - last_trough_price) / last_peak_price
-            is_contracting = depth_2 < (depth_1 * 0.9)
-            current_price = self.df['Close'].iloc[-1]
-            near_breakout = current_price >= (last_peak_price * 0.95)
-            if is_contracting and near_breakout: return {"detected": True, "msg": f"Contraction from {depth_1*100:.1f}% to {depth_2*100:.1f}%."}
-            else: return {"detected": False, "msg": "Volatility not contracting."}
-        except Exception as e: return {"detected": False, "msg": f"Error: {str(e)}"}
-
-    # --- NEW: Wyckoff Spring Detection ---
-    def detect_wyckoff_spring(self):
-        res = {"detected": False, "msg": "", "support_level": 0}
-        try:
-            if self.data_len < 30: return res
+            divergence_days = 0
             
-            # Look back 20-40 days for a support level
-            # Exclude last 5 days to find prior support established before current move
-            recent_window = self.df.iloc[-40:-5] 
-            if recent_window.empty: return res
-            
-            support_level = recent_window['Low'].min()
-            
-            # Check last 3 days for the "Spring" action
-            # Price dips below support but closes back above
-            last_few = self.df.iloc[-3:]
-            
-            for i in range(len(last_few)):
-                candle = last_few.iloc[i]
-                # Shakeout: Low below support
-                if candle['Low'] < support_level * 0.995: # 0.5% penetration to be significant
-                    # Recovery: Close back above support (strict)
-                    if candle['Close'] > support_level:
-                        res = {
-                            "detected": True, 
-                            "msg": f"Wyckoff Spring (Tested {support_level:,.0f} & Reclaimed)",
-                            "support_level": support_level
-                        }
-                        break
-        except: pass
-        return res
-
-    def detect_candle_patterns(self):
-        res = {"pattern": "None", "sentiment": "Neutral"}
-        try:
-            if self.data_len < 4: return res
-            df = self.df.iloc[-4:].copy()
-            df['Body'] = abs(df['Close'] - df['Open'])
-            avg_body = df['Body'].mean()
-            
-            c0 = df.iloc[-1] # Today
-            c1 = df.iloc[-2] # Yesterday
-            c2 = df.iloc[-3] # 2 days ago
-            
-            is_green_0 = c0['Close'] > c0['Open']
-            is_green_1 = c1['Close'] > c1['Open']
-            is_red_2 = c2['Close'] < c2['Open']
-            
-            # Existing Engulfing
-            if not is_green_0 and c0['Open'] > c1['Close'] and c0['Close'] < c1['Open']: 
-                res = {"pattern": "Bearish Engulfing", "sentiment": "Strong Reversal Down"}
-            elif is_green_0 and c0['Close'] > c1['Open'] and c0['Open'] < c1['Close']: 
-                res = {"pattern": "Bullish Engulfing", "sentiment": "Strong Reversal Up"}
-            
-            # --- NEW: Morning Star ---
-            # 1. Long Red (c2)
-            # 2. Small Gap Down or Small Body (c1)
-            # 3. Strong Green closing > midpoint of Red (c0)
-            elif is_red_2 and (c2['Body'] > avg_body):
-                if c1['Body'] < (avg_body * 0.6): # Small body
-                    midpoint = (c2['Open'] + c2['Close']) / 2
-                    if is_green_0 and c0['Close'] > midpoint:
-                        res = {"pattern": "Morning Star", "sentiment": "Bullish Reversal"}
-
-        except Exception: pass
-        return res
-
-    def detect_volume_breakout(self):
-        res = {"detected": False, "msg": ""}
-        try:
-            if self.data_len < 2: return res
-            c0 = self.df.iloc[-1] 
-            c1 = self.df.iloc[-2] 
-            is_green = c0['Close'] > c0['Open']
-            is_up = c0['Close'] > c1['Close']
-            vol_ok = c0['Volume'] > c0['VOL_MA']
-            tx_value = c0['Close'] * c0['Volume']
-            min_liq = self.config["MIN_DAILY_VOL"]
-            liq_ok = tx_value > min_liq
-            if is_green and is_up and vol_ok and liq_ok:
-                res = {"detected": True, "msg": "High Volume Accumulation Day"}
-        except Exception: pass
-        return res
-
-    def detect_vsa_anomalies(self):
-        res = {"detected": False, "msg": ""}
-        try:
-            if self.data_len < 2: return res
-            c0 = self.df.iloc[-1]
-            spread = c0['High'] - c0['Low']
-            avg_spread = (self.df['High'] - self.df['Low']).rolling(20).mean().iloc[-1]
-            vol_ratio = c0['RVOL'] 
-            is_down_or_flat = c0['Close'] <= c0['Open']
-            if is_down_or_flat and vol_ratio > 1.5 and spread < avg_spread:
-                res = {"detected": True, "msg": "Stopping Volume (Absorption)"}
-            elif vol_ratio > 2.0 and spread < (0.5 * avg_spread):
-                res = {"detected": True, "msg": "Churning (High Effort, Low Result)"}
-        except Exception: pass
-        return res
-
-    # --- NEW: Detect Inside Bar ---
-    def detect_inside_bar(self):
-        res = {"detected": False, "high": 0, "low": 0, "msg": ""}
-        try:
-            if self.data_len < 2: return res
-            
-            curr = self.df.iloc[-1]
-            prev = self.df.iloc[-2]
-            
-            # Inside Bar Logic: High < Prev High AND Low > Prev Low
-            is_inside = (curr['High'] < prev['High']) and (curr['Low'] > prev['Low'])
-            
-            if is_inside:
-                # Check volume for "Coil" effect (low volume is better)
-                is_low_vol = curr['Volume'] < prev['Volume']
-                msg = "Inside Bar (Coil)" if is_low_vol else "Inside Bar (Volatility Contraction)"
+            # Check backwards from today
+            for i in range(2, window):
+                # Slice last i days
+                p_slice = close.iloc[-i:]
+                o_slice = obv.iloc[-i:]
                 
-                res = {
-                    "detected": True,
-                    "high": prev['High'], # Breakout trigger
-                    "low": prev['Low'],   # Breakdown trigger
-                    "msg": msg
-                }
-        except: pass
-        return res
-    
-    # --- NEW: Detect Stealth Accumulation ---
-    def detect_stealth_accumulation(self):
-        # Check for high volume with low price movement near recent highs
-        try:
-            if self.data_len < 2: return False
-            c0 = self.df.iloc[-1]
-            spread = c0['High'] - c0['Low']
-            avg_spread = self.df['ATR'].iloc[-1]
-            
-            # High Volume (>1.5x) + Small Spread (<0.8x ATR) + Close in upper half
-            if c0['RVOL'] > 1.5 and spread < (0.8 * avg_spread) and c0['Close'] > ((c0['High'] + c0['Low']) / 2):
-                return True
-        except: pass
-        return False
-
-    def analyze_smart_money_enhanced(self):
-        res = {"status": "NEUTRAL", "signals": [], "metrics": {}, "accum_days": 0}
-        try:
-            c0 = self.df.iloc[-1]
-            score = 0
-            
-            # --- PROFESSIONAL UPGRADE: CLV-based Volume Pressure ---
-            # Instead of naive Green/Red candles, we use Close Location Value (CLV)
-            # CLV = ((C - L) - (H - C)) / (H - L)
-            # This accounts for selling pressure inside a green candle (long upper wick)
-            # and buying pressure inside a red candle (long lower wick).
-            
-            lookback = 20
-            recent = self.df.iloc[-lookback:].copy()
-            
-            # Calculate CLV (Money Flow Multiplier)
-            # Handle division by zero (if High == Low)
-            range_len = recent['High'] - recent['Low']
-            range_len = range_len.replace(0, 0.00001) # Avoid ZeroDiv
-            
-            recent['CLV'] = ((recent['Close'] - recent['Low']) - (recent['High'] - recent['Close'])) / range_len
-            
-            # Buy Volume = Volume * (CLV + 1) / 2
-            # Sell Volume = Volume * (1 - CLV) / 2
-            # Values range from 0 to Volume.
-            
-            recent['Buy_Vol'] = recent['Volume'] * (recent['CLV'] + 1) / 2
-            recent['Sell_Vol'] = recent['Volume'] * (1 - recent['CLV']) / 2
-            
-            total_buy_vol = recent['Buy_Vol'].sum()
-            total_sell_vol = recent['Sell_Vol'].sum()
-            total_vol = total_buy_vol + total_sell_vol
-            
-            buy_pressure = (total_buy_vol / total_vol) * 100 if total_vol > 0 else 50
-            
-            # --- UPDATED: Accumulation Days Calculation ---
-            # Count consecutive days where Buy Vol > Sell Vol up to the current day
-            consecutive_accum = 0
-            for i in range(len(recent)-1, -1, -1):
-                if recent['Buy_Vol'].iloc[i] > recent['Sell_Vol'].iloc[i]:
-                    consecutive_accum += 1
+                p_slope = self.calc_slope(p_slice, i)
+                o_slope = self.calc_slope(o_slice, i)
+                
+                # Check for Strong Divergence: Price Falling, OBV Rising
+                if p_slope < -0.1 and o_slope > 0.1:
+                    divergence_days = i
                 else:
-                    break
-            res['accum_days'] = consecutive_accum
+                    # Break if pattern stops (we want contiguous days from now)
+                    # Actually, for "how long", we want the max window that satisfies this
+                    # But divergence is often a specific setup, not a continuous state for 60 days.
+                    # Let's check if the *current* state is divergent.
+                    pass
 
-            # --- END UPGRADE ---
-
-            # Old naive spike detection remains useful for "Aggression"
-            avg_vol = recent['Volume'].mean()
-            if avg_vol > 0:
-                spikes = recent[recent['Volume'] > 1.25 * avg_vol]
-                # Keep naive count for visual "days of interest"
-                green_spikes = len(spikes[spikes['Close'] > spikes['Open']])
-                red_spikes = len(spikes[spikes['Close'] < spikes['Open']])
-            else:
-                green_spikes, red_spikes = 0, 0
-
-            res['metrics'] = {'buy_pressure': buy_pressure, 'green_spikes': green_spikes, 'red_spikes': red_spikes}
-
-            if c0['Close'] > c0['VWAP']: score += 1; res['signals'].append("Price > VWAP (Inst. Support)")
-            else: score -= 1; res['signals'].append("Price < VWAP (Weakness)")
-
-            if c0['NVI'] > c0['NVI_EMA']: score += 1; res['signals'].append("NVI > EMA (Accumulation)")
+            # Alternative: Detect divergence over fixed windows (14, 21, 30 days) and pick the longest
+            max_div_days = 0
             
-            if 'AD_Line' in self.df.columns and len(self.df) > 5:
-                ad_slope = self.calc_slope(self.df['AD_Line'], 5)
-                price_slope = self.calc_slope(self.df['Close'], 5)
-                if ad_slope > 0 and price_slope < 0:
-                     score += 2; res['signals'].append("BULLISH DIV: Price down, A/D Line up!")
-                elif ad_slope > 0:
-                     score += 1; res['signals'].append("A/D Line Rising (Buying Pressure)")
+            for d in [14, 21, 30, 45, 60]:
+                p_chg = (close.iloc[-1] - close.iloc[-d]) / close.iloc[-d]
+                o_chg = (obv.iloc[-1] - obv.iloc[-d]) / obv.iloc[-d] # Normalized change
+                
+                # Need to be careful with OBV magnitude, simple slope is better
+                p_slope = self.calc_slope(close.iloc[-d:], d)
+                o_slope = self.calc_slope(obv.iloc[-d:], d)
 
-            if 'PVT' in self.df.columns and len(self.df) > 5:
-                pvt_slope = self.calc_slope(self.df['PVT'], 5)
-                if pvt_slope > 0: score += 1; res['signals'].append("PVT Rising (Positive Volume Trend)")
+                if p_slope < 0 and o_slope > 0:
+                    max_div_days = d
             
-            # New: Stealth Accumulation Check
-            if self.detect_stealth_accumulation():
-                score += 2; res['signals'].append("Stealth Accumulation (High Vol, Low Spread)")
-
-            if buy_pressure > 60:
-                 score += 1; res['signals'].append(f"Institutional Net Buying ({buy_pressure:.0f}%)")
-            elif buy_pressure < 40:
-                 score -= 1; res['signals'].append(f"Institutional Net Selling ({100-buy_pressure:.0f}%)")
-
-            spread = c0['High'] - c0['Low']
-            avg_spread = self.df['ATR'].iloc[-1]
-            is_down = c0['Close'] < c0['Open']
-            is_up = c0['Close'] > c0['Open']
-            
-            lower_wick = min(c0['Open'], c0['Close']) - c0['Low']
-            body = abs(c0['Close'] - c0['Open'])
-            
-            if is_down and c0['RVOL'] > 1.5 and lower_wick > (0.4 * spread):
-                 score += 2; res['signals'].append("VSA: Stopping Volume (Potential Reversal)")
-            
-            if is_down and c0['RVOL'] > 1.5 and body < (0.3 * spread):
-                 score += 2; res['signals'].append("Wyckoff: Effort vs Result (Bullish)")
-
-            if is_up and c0['RVOL'] < 0.7:
-                 score -= 1; res['signals'].append("VSA: No Demand (Weak Rally)")
-
-            if score >= 2: res['status'] = "BULLISH (Accumulation)"
-            elif score <= -2: res['status'] = "BEARISH (Distribution)"
+            if max_div_days > 0:
+                 res = {
+                     "detected": True, 
+                     "msg": f"Bullish Divergence (Price Down, OBV Up)",
+                     "duration": max_div_days
+                 }
+                 
         except: pass
         return res
-
-    def calculate_position_size(self, entry, stop_loss):
-        balance = self.config["ACCOUNT_BALANCE"]
-        risk_pct = self.config["RISK_PER_TRADE_PCT"]
-        if entry <= stop_loss: return 0, 0
-        risk_amt = balance * (risk_pct / 100)
-        risk_per_share = entry - stop_loss
-        shares = risk_amt / risk_per_share
-        lots = int(shares / 100)
-        max_cap = balance * 0.25
-        if (lots * 100 * entry) > max_cap: lots = int((max_cap / entry) / 100)
-        return lots, risk_amt
-
-    def adjust_to_tick_size(self, price):
-        if price < 200: tick = 1
-        elif price < 500: tick = 2
-        elif price < 2000: tick = 5
-        elif price < 5000: tick = 10
-        else: tick = 25
-        return round(price / tick) * tick
-
-    # --- UPDATED: Sniper Edition Trade Plan with Swing Adjustments & RSI/Stoch ---
-    def calculate_trade_plan_hybrid(self, ctx, trend_status, best_strategy):
-        # Default Plan
-        plan = {
-            "type": "HYBRID", 
-            "entry": 0, 
-            "stop_loss": 0, 
-            "take_profit": 0, 
-            "status": "WAIT", 
-            "reason": "No Signal"
-        }
-        
-        atr = ctx['atr']
-        current_price = ctx['price']
-        
-        # Container for valid setups
-        valid_setups = []
-        
-        # 0. NEW PRIORITY: SNIPER RSI+STOCH
-        try:
-            curr_rsi = self.df['RSI'].iloc[-1]
-            prev_rsi = self.df['RSI'].iloc[-2]
-            
-            # --- DYNAMIC STOCH ---
-            best_stoch = ctx.get('best_stoch', {})
-            # Use found settings, or default 14,3
-            k_pd = best_stoch.get('k', 14)
-            d_pd = best_stoch.get('d', 3)
-            
-            # Need to recalculate if not standard 14,3 (which is pre-calc)
-            # For efficiency in decision phase, we re-calc last 2 points
-            if k_pd != 14:
-                k, d = self.calc_stoch(self.df['High'], self.df['Low'], self.df['Close'], k_pd, d_pd)
-                curr_k = k.iloc[-1]
-                prev_k = k.iloc[-2]
-                curr_d = d.iloc[-1]
-            else:
-                curr_k = self.df['STOCHk'].iloc[-1]
-                prev_k = self.df['STOCHk'].iloc[-2]
-                curr_d = self.df['STOCHd'].iloc[-1]
-            
-            # --- NEW: DYNAMIC RSI INTEGRATION ---
-            best_rsi_settings = ctx.get('best_rsi', {})
-            rsi_pd = best_rsi_settings.get('period', 14)
-            
-            # If not default, calc the dynamic RSI value for signal check
-            if rsi_pd != 14:
-                dyn_rsi = self.calc_rsi(self.df['Close'], rsi_pd)
-                curr_rsi = dyn_rsi.iloc[-1]
-                prev_rsi = dyn_rsi.iloc[-2]
-            
-            # Logic: RSI healthy (>50 or rising from >40) AND Stoch crossing up from oversold
-            rsi_ok = (curr_rsi > 50) or (curr_rsi > 40 and curr_rsi > prev_rsi)
-            stoch_buy = (prev_k < 20) and (curr_k > prev_k) and (curr_k > curr_d)
-            
-            if rsi_ok and stoch_buy:
-                valid_setups.append({
-                    "reason": f"SNIPER: RSI({rsi_pd}) Trend + Stoch ({k_pd},{d_pd}) Reversal",
-                    "entry": current_price,
-                    "sl": current_price - (atr * 2.0),
-                    "type": "SNIPER_MOMENTUM"
-                })
-        except: pass
-
-        # 0.5. NEW: Inside Bar Breakout
-        ib = ctx.get('inside_bar', {})
-        if ib.get('detected'):
-             valid_setups.append({
-                "reason": f"PATTERN: Inside Bar Coil (Breakout > {ib['high']})",
-                "entry": ib['high'],
-                "sl": ib['low'],
-                "type": "INSIDE_BAR"
-            })
-
-        # --- NEW: Wyckoff Spring Setup ---
-        spring = ctx.get('wyckoff', {})
-        if spring.get('detected'):
-             valid_setups.append({
-                "reason": f"PATTERN: {spring['msg']}",
-                "entry": current_price,
-                "sl": spring['support_level'] * 0.98, # Stop below the spring low
-                "type": "REVERSAL"
-            })
-            
-        # --- NEW: Morning Star Setup ---
-        candle = ctx.get('candle', {})
-        if "Morning Star" in candle.get('pattern', ''):
-             valid_setups.append({
-                "reason": "PATTERN: Morning Star Reversal",
-                "entry": current_price,
-                "sl": current_price - (atr * 1.5),
-                "type": "REVERSAL"
-            })
-
-        # 3. Check Low Cheat (VCP)
-        if ctx['low_cheat']['detected']:
-            valid_setups.append({
-                "reason": "VCP: Valid Low Cheat Setup",
-                "entry": current_price,
-                "sl": current_price - (atr * 2.0), # Swing: Wider SL
-                "type": "EARLY_ENTRY"
-            })
-             
-        # 4. Check Standard Trend Strategy (Golden Confluence)
-        if best_strategy['is_triggered_today'] and "STRONG" in trend_status and "BULLISH" in ctx['smart_money']['status']:
-            valid_setups.append({
-                "reason": f"CONFLUENCE: {best_strategy['strategy']} + Smart Money + Strong Trend",
-                "entry": current_price,
-                "sl": current_price - (atr * 3.0), # Swing: Wide SL for Trend Following
-                "type": "TREND"
-            })
-        
-        # 5. Dynamic MA Support (Updated logic)
-        best_ma = ctx.get('best_ma', {})
-        if best_ma.get('score', 0) > 3 and best_ma.get('win_rate', 0) > 50:
-             ma_price = best_ma['price']
-             if abs(current_price - ma_price) / ma_price < 0.015:
-                 valid_setups.append({
-                    "reason": f"SNIPER: Validated Dynamic EMA {best_ma['period']} (WR: {best_ma['win_rate']}%)",
-                    "entry": ma_price,
-                    "sl": ma_price - (atr * 1.5),
-                    "type": "DYNAMIC_MA"
-                })
-
-        # --- DECISION LOGIC ---
-        if not valid_setups:
-            plan["reason"] = "No valid entry. Wait for support or breakout."
-            return plan
-
-        primary_setup = valid_setups[0]
-        combined_reasons = [s['reason'] for s in valid_setups]
-        final_reason = " + ".join(combined_reasons)
-        
-        # Calculate Entry
-        entry_price = self.adjust_to_tick_size(primary_setup['entry'])
-        
-        # Pullback Logic: If entry is breakout, suggest Limit slightly below
-        if primary_setup['type'] == "BREAKOUT":
-             entry_price = self.adjust_to_tick_size(primary_setup['entry'] * 0.995) # 0.5% discount
-             final_reason += " (Limit Order)"
-
-        if current_price > entry_price and primary_setup['type'] != "BREAKOUT" and primary_setup['type'] != "INSIDE_BAR":
-            entry_price = current_price
-
-        stop_loss = self.adjust_to_tick_size(primary_setup['sl'])
-        if stop_loss >= entry_price:
-            stop_loss = self.adjust_to_tick_size(entry_price - atr)
-
-        risk = entry_price - stop_loss
-        
-        if risk > 0:
-            plan['status'] = "EXECUTE"
-            plan['reason'] = final_reason
-            plan['entry'] = entry_price
-            plan['stop_loss'] = stop_loss
-            plan['take_profit'] = self.adjust_to_tick_size(entry_price + (risk * self.config["TP_MULTIPLIER"])) # Use Swing Target
-            
-            lots, risk_amt = self.calculate_position_size(plan['entry'], plan['stop_loss'])
-            plan['lots'] = lots
-            plan['risk_amt'] = risk_amt
-            
-            # --- NEW: Calculate Probabilities for Targets ---
-            # Using ATR and Historical Similar Setups
-            plan['probs'] = self.calculate_target_probabilities(plan['entry'], plan['stop_loss'], atr)
-            
-        else:
-             plan['status'] = "WAIT"
-             plan['reason'] = "Risk Invalid (Stop > Entry)"
-
-        return plan
-
-    def calculate_probability(self, best_strategy, context, trend_template):
-        base_prob = best_strategy.get('win_rate', 50)
-        if base_prob < 0: base_prob = 50
-        
-        # Use sigmoid-like dampening to prevent overconfidence
-        # Base: 50% -> Max movement from signals capped at +/- 40%
-        signal_score = 0
-        
-        if trend_template["status"] in ["PERFECT UPTREND (Stage 2)", "STRONG UPTREND"]: signal_score += 15
-        elif trend_template["status"] == "DOWNTREND / BASE": signal_score -= 20
-        
-        if "BUYING" in context['smart_money']: signal_score += 10
-        elif "SELLING" in context['smart_money']: signal_score -= 10
-        
-        # --- NEW: Hurst Exponent Impact ---
-        hurst = context.get('hurst', 0.5)
-        if hurst > 0.6: signal_score += 10 # Strong Trend Mode
-        elif hurst < 0.4: signal_score -= 10 # Mean Reverting (Bad for breakouts)
-        
-        # --- NEW: Relative Strength Impact ---
-        rs_score = context.get('rs_score', 50)
-        if rs_score > 70: signal_score += 10
-        elif rs_score < 30: signal_score -= 10
-        
-        if context['vol_breakout']['detected']: signal_score += 5
-        if context['vsa']['detected'] and "Stopping" in context['vsa']['msg']: signal_score += 5
-        if context['low_cheat']['detected']: signal_score += 10
-        if context['vcp']['detected']: signal_score += 5
-        if "Bullish" in context['candle']['sentiment']: signal_score += 5
-        
-        # --- NEW: Pattern Boost ---
-        if context.get('wyckoff', {}).get('detected'): signal_score += 15
-        if "Morning Star" in context.get('candle', {}).get('pattern', ''): signal_score += 10
-
-        # Blend historical win rate with current signal strength
-        # Weight: 40% History, 60% Current Signal
-        final_prob = (base_prob * 0.4) + (50 + signal_score) * 0.6
-        
-        # Hard caps
-        final_prob = max(10, min(90, final_prob))
-        
-        verdict = "LOW PROBABILITY"
-        if final_prob >= 75: verdict = "HIGH PROBABILITY"
-        elif final_prob >= 60: verdict = "MODERATE PROBABILITY"
-        
-        return {"value": round(final_prob, 1), "verdict": verdict}
-
-    def validate_signal(self, action, context, trend_template):
-        score = 0
-        reasons = []
-        if trend_template["status"] in ["PERFECT UPTREND (Stage 2)", "STRONG UPTREND"]:
-            score += 2; reasons.append("Stage 2 Uptrend (Minervini)")
-        rvol = self.df['RVOL'].iloc[-1] if 'RVOL' in self.df.columns else 1.0
-        if rvol > 1.2: score += 1; reasons.append("High Volume")
-        if context['vol_breakout']['detected']:
-             score += 2; reasons.append("Abnormal Accumulation Day")
-        if context['low_cheat']['detected']:
-             score += 2; reasons.append("Low Cheat Entry")
-        if "BUYING" in context['smart_money']: score += 1; reasons.append("Smart Money Accumulation")
-        if context['vsa']['detected']:
-             reasons.append(f"VSA: {context['vsa']['msg']}")
-             if "Absorption" in context['vsa']['msg']: score += 1
-        if self.market_df is not None and len(self.market_df) > 5:
-            s_ret = (self.df['Close'].iloc[-1] - self.df['Close'].iloc[-5]) / self.df['Close'].iloc[-5]
-            m_ret = (self.market_df['Close'].iloc[-1] - self.market_df['Close'].iloc[-5]) / self.market_df['Close'].iloc[-5]
-            if s_ret > m_ret: score += 1; reasons.append("Leader vs IHSG")
-        if context['squeeze']['detected']: score += 2; reasons.append("TTM Squeeze Firing")
-        
-        # --- NEW: Pattern Validation ---
-        if context.get('wyckoff', {}).get('detected'): 
-            score += 3; reasons.append("Wyckoff Spring (Strong Reversal)")
-        if "Morning Star" in context.get('candle', {}).get('pattern', ''):
-            score += 2; reasons.append("Morning Star Pattern")
-            
-        # --- NEW: Quant Validation ---
-        if context.get('hurst', 0.5) > 0.55:
-            score += 1; reasons.append(f"Hurst {context['hurst']:.2f} (Trending)")
-        if context.get('rs_score', 50) > 60:
-            score += 1; reasons.append(f"RS Score {context['rs_score']} (Outperforming)")
-        
-        verdict = "WEAK"
-        if score >= 5: verdict = "ELITE SWING SETUP"
-        elif score >= 3: verdict = "MODERATE"
-        return score, verdict, reasons
-    
-    # --- NEW: MACHINE LEARNING MODULE 1 (PRICE PREDICTION - XGBOOST) ---
-    def predict_machine_learning(self):
-        # REMOVED AS REQUESTED
-        return {"confidence": 0.0, "prediction": "N/A", "msg": "ML Module Disabled"}
-
-    # --- NEW: MACHINE LEARNING MODULE 2 (BANDAR/ACCUMULATION DETECTOR - XGBOOST) ---
-    def predict_bandar_accumulation(self):
-        # REMOVED AS REQUESTED
-        return {"probability": 0, "verdict": "Disabled"}
-
-    # --- NEW: MACHINE LEARNING MODULE 3 (SUPPORT LEVEL PREDICTION - XGBOOST REGRESSOR) ---
-    def predict_support_level_ml(self):
-        try:
-            if self.data_len < 100: return 0
-            
-            ml_df = self.df.copy()
-            
-            # FIX: Target is % Distance to Support, NOT raw price
-            # We predict: (Lowest Low in next 5 days - Current Close) / Current Close
-            future_low = ml_df['Low'].shift(-5).rolling(window=5).min()
-            ml_df['Target_Dist'] = (future_low - ml_df['Close']) / ml_df['Close']
-            
-            ml_df['Dist_EMA50'] = (ml_df['Close'] - ml_df['EMA_50']) / ml_df['EMA_50']
-            ml_df['Dist_EMA200'] = (ml_df['Close'] - ml_df['EMA_200']) / ml_df['EMA_200']
-            ml_df['ATR_Pct'] = ml_df['ATR'] / ml_df['Close']
-            ml_df['RSI'] = ml_df['RSI']
-            
-            features = ['Dist_EMA50', 'Dist_EMA200', 'ATR_Pct', 'RSI']
-            ml_df = ml_df.dropna()
-            
-            X = ml_df[features].iloc[:-5]
-            y = ml_df['Target_Dist'].iloc[:-5]
-            
-            # XGBoost Regressor
-            reg = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
-            reg.fit(X, y)
-            
-            last_row = ml_df[features].iloc[-1:].values
-            pred_dist = reg.predict(last_row)[0]
-            
-            # Convert % distance back to price level
-            current_close = self.df['Close'].iloc[-1]
-            predicted_support = current_close * (1 + pred_dist)
-            
-            return predicted_support
-            
-        except: return 0
 
     def get_market_context(self):
         last_price = self.df['Close'].iloc[-1]
@@ -1910,9 +1310,7 @@ class StockAnalyzer:
             "lc_stats": self.backtest_low_cheat_performance(), 
             "fib_stats": self.backtest_fib_bounce(),
             "ma_stats": self.backtest_ma_support_all(),
-            #"ml_prediction": self.predict_machine_learning(), # General Price Prediction - DISABLED
-            #"bandar_ml": self.predict_bandar_accumulation(), # Bandar ML - DISABLED
-            "ai_support": self.predict_support_level_ml(), # --- NEW: Support Prediction
+            "bandar_ml": self.detect_smart_money_divergence(), # REPLACED: Divergence Check
             "hurst": self.calc_hurst(self.df['Close']), # --- NEW: Hurst
             "rs_score": self.calc_relative_strength_score(), # --- NEW: RS Score
             "mc_sim": self.simulate_monte_carlo(self.optimize_stock(1, 60)), # --- NEW: Monte Carlo
