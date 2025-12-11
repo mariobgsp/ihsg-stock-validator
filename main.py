@@ -10,7 +10,7 @@ def clear_screen():
 def print_header():
     print("="*65)
     print("      IHSG ULTIMATE SCANNER (V3.4 - Sniper Edition)      ")
-    print("      Precision Entry + Multi-Timeframe + Smart Money + XGBoost")
+    print("      Precision Entry + Multi-Timeframe + Smart Money + Quant")
     print("="*65)
 
 def print_report(data, balance):
@@ -61,10 +61,7 @@ def print_report(data, balance):
     sm = data['context']['smart_money']
     symbol = "✅" if "BULLISH" in sm['status'] else "⚠️ " if "BEARISH" in sm['status'] else "🔹"
     print(f"\n{symbol} SMART MONEY (Bandarmology Proxy)")
-    
-    # --- UPDATED: Show Accumulation Duration ---
-    duration_str = f"({sm.get('accum_days', 0)} Days Accumulating)"
-    print(f"   Status: {sm['status']} {duration_str}")
+    print(f"   Status: {sm['status']}")
     
     metrics = sm.get('metrics', {})
     if metrics:
@@ -78,24 +75,17 @@ def print_report(data, balance):
         r_spikes = metrics.get('red_spikes', 0)
         print(f"   Big Moves: {g_spikes} Accumulation Days vs {r_spikes} Distribution Days")
     
-    # --- ML PREDICTIONS REMOVED ---
-    # b_ml = data['context'].get('bandar_ml', {})
-    # prob = b_ml.get('probability', 0)
-    # print(f"   AI Accumulation Score: {prob:.1f}% ({b_ml.get('verdict', 'Unknown')})")
+    # --- NEW: DIVERGENCE CHECK (Replaces ML) ---
+    b_div = data['context'].get('bandar_ml', {})
+    if b_div.get('detected'):
+         print(f"   🔥 [ALERT]: {b_div['msg']}")
+         # Display the duration
+         duration = b_div.get('duration', 0)
+         if duration > 0:
+             print(f"      Accumulation Duration: {duration} Days")
 
     for s in sm['signals']: print(f"   - {s}")
     
-    # --- ML PREDICTIONS REMOVED ---
-    # ml = data['context'].get('ml_prediction', {})
-    # print(f"\n🤖 AI / MACHINE LEARNING (XGBoost Strict Mode)")
-    # if ml.get('prediction') == "N/A":
-    #      print(f"   Status: Insufficient Data")
-    # else:
-    #     conf = ml.get('confidence', 0)
-    #     emoji = "🚀" if "High Conviction" in ml.get('prediction') else "🐻" if "BEARISH" in ml.get('prediction') else "⚖️"
-    #     print(f"   Forecast:   {emoji} {ml.get('prediction')} ({conf:.1f}% Confidence)")
-    #     print(f"   Logic:      {ml.get('msg')}")
-
     # 5. SETUP & STRUCTURE (Replaced Patterns)
     print(f"\n💎 SETUP & STRUCTURE")
     
@@ -103,6 +93,11 @@ def print_report(data, balance):
     vcp = data['context'].get('vcp', {})
     if vcp.get('detected'):
          print(f"   [VCP DETECTED] {vcp['msg']}")
+
+    # Wyckoff Check
+    wyc = data['context'].get('wyckoff', {})
+    if wyc.get('detected'):
+         print(f"   [WYCKOFF]      {wyc['msg']}")
          
     # Low Cheat Check
     lc = data['context'].get('low_cheat', {})
@@ -246,10 +241,7 @@ def main():
     parser.add_argument('--balance', type=int, default=10_000_000, help="Account Balance (IDR)")
     parser.add_argument('--risk', type=float, default=1.0, help="Risk per trade")
     
-    # UPDATED ARGUMENTS
-    parser.add_argument('--ml_period', default=DEFAULT_CONFIG['ML_PERIOD'], help="Data period for ML (default 5y)")
-    parser.add_argument('--period', default=DEFAULT_CONFIG['BACKTEST_PERIOD'], help="Data period for Backtest (default 2y)")
-    
+    parser.add_argument('--period', default=DEFAULT_CONFIG['BACKTEST_PERIOD'], help="Data period (e.g. 1y, 2y)")
     parser.add_argument('--sl', type=float, default=DEFAULT_CONFIG['SL_MULTIPLIER'], help="Stop Loss ATR Multiplier")
     parser.add_argument('--tp', type=float, default=DEFAULT_CONFIG['TP_MULTIPLIER'], help="Take Profit ATR Multiplier")
     parser.add_argument('--fib', type=int, default=DEFAULT_CONFIG['FIB_LOOKBACK_DAYS'], help="Fibonacci Lookback Days")
@@ -267,8 +259,7 @@ def main():
     user_config = {
         "ACCOUNT_BALANCE": args.balance,
         "RISK_PER_TRADE_PCT": args.risk,
-        "ML_PERIOD": args.ml_period,        # New ML Period
-        "BACKTEST_PERIOD": args.period,     # Standard Backtest Period
+        "BACKTEST_PERIOD": args.period,
         "SL_MULTIPLIER": args.sl,
         "TP_MULTIPLIER": args.tp,
         "FIB_LOOKBACK_DAYS": args.fib,
@@ -277,8 +268,7 @@ def main():
         "MIN_DAILY_VOL": args.min_vol
     }
 
-    print(f"\nRunning Mega Analysis on {args.ticker.upper()}...")
-    print(f"Config: ML={args.ml_period}, Backtest={args.period}")
+    print(f"\nRunning Mega Analysis on {args.ticker.upper()}... (Config: {user_config})")
     analyzer = StockAnalyzer(args.ticker, user_config)
     print_report(analyzer.generate_final_report(), args.balance)
 
