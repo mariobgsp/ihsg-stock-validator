@@ -1,99 +1,95 @@
 import sys
 import argparse
-from colorama import init, Fore, Style, Back
-from engine import QuantEngine
+from engine import StrategyEngine
 
-# Initialize Colorama
-init(autoreset=True)
+def print_separator():
+    print("-" * 50)
 
-def print_header():
-    print(f"\n{Back.BLUE}{Fore.WHITE} ========================================================== {Style.RESET_ALL}")
-    print(f"{Back.BLUE}{Fore.WHITE}      IHSG SWING TRADER PRO - QUANT ENGINE (v1.0)           {Style.RESET_ALL}")
-    print(f"{Back.BLUE}{Fore.WHITE} ========================================================== {Style.RESET_ALL}\n")
+def print_header(text):
+    print(f"\n=== {text.upper()} ===")
 
-def print_verdict_card(data):
-    verdict = data['verdict']
-    color = Fore.WHITE
-    
-    if "BUY" in verdict:
-        color = Fore.GREEN
-    elif "NO TRADE" in verdict:
-        color = Fore.RED
-    else:
-        color = Fore.YELLOW
-
-    print(f"{Style.BRIGHT}TARGET: {Fore.CYAN}{data['ticker']}{Style.RESET_ALL} | PRICE: {Fore.CYAN}Rp {int(data['current_price'])}{Style.RESET_ALL}")
-    print(f"\n{Style.BRIGHT}------------------ AI VERDICT ------------------")
-    print(f"{Style.BRIGHT}SIGNAL: {color}{verdict}{Style.RESET_ALL}")
-    print(f"{Style.BRIGHT}WHY?:   {Fore.WHITE}{data['why']}{Style.RESET_ALL}")
-    
-    if data['patterns']['Accumulation']:
-        print(f"        {Fore.GREEN}✔ Smart Money Accumulation Detected since {data['smart_money_date'].strftime('%Y-%m-%d')}{Style.RESET_ALL}")
-    if data['patterns']['VCP']:
-        print(f"        {Fore.GREEN}✔ VCP Pattern (Volatility Contraction) Confirmed{Style.RESET_ALL}")
-    if data['patterns']['Squeeze']:
-        print(f"        {Fore.MAGENTA}✔ MA Squeeze / Superclose Detected{Style.RESET_ALL}")
-
-def print_trade_plan(data):
-    if "NO TRADE" in data['verdict']:
-        return
-
-    plan = data['trade_plan']
-    print(f"\n{Style.BRIGHT}------------------ TRADE PLAN (OJK RULES) ------------------")
-    print(f"ENTRY: {Fore.CYAN}Rp {int(data['current_price'])}{Style.RESET_ALL} (Market)")
-    print(f"STOP LOSS: {Fore.RED}Rp {int(plan['sl'])}{Style.RESET_ALL} (risk 1R)")
-    print(f"TARGET 1:  {Fore.GREEN}Rp {int(plan['tp1'])}{Style.RESET_ALL} (1.5R - Secure Profits)")
-    print(f"TARGET 2:  {Fore.GREEN}Rp {int(plan['tp2'])}{Style.RESET_ALL} (3.0R - Golden Ratio)")
-    print(f"TARGET 3:  {Fore.GREEN}Rp {int(plan['tp3'])}{Style.RESET_ALL} (4.5R - Runner)")
-
-def print_stats(data):
-    wr = data['win_rate']
-    wr_color = Fore.GREEN if wr > 65 else Fore.RED
-    
-    print(f"\n{Style.BRIGHT}------------------ RISK & LOGIC ------------------")
-    print(f"Hist. Win Rate: {wr_color}{wr:.1f}%{Style.RESET_ALL} (Based on 3Y Backtest)")
-    print(f"Best Strategy:  MA Crossover {data['best_params'][0]}/{data['best_params'][1]} + RSI < {data['best_params'][2]}")
-    
-    print(f"\n{Style.BRIGHT}------------------ TECH DEEP DIVE ------------------")
-    print(f"RSI (14):     {data['technicals']['rsi']:.2f}")
-    print(f"Stoch K:      {data['technicals']['stoch_k']:.2f}")
-    print(f"VWAP:         {data['technicals']['vwap']:.2f}")
-    print(f"OBV Slope:    {data['smart_money_slope']:.4f}")
+def format_currency(val):
+    return f"Rp {int(val):,}"
 
 def main():
-    parser = argparse.ArgumentParser(description='IHSG Swing Trading Quant CLI')
-    parser.add_argument('ticker', type=str, help='Stock Ticker (e.g., BBRI, TLKM)')
+    parser = argparse.ArgumentParser(description="IHSG Swing Trading Quant Engine")
+    parser.add_argument("ticker", type=str, help="Stock Ticker (e.g., BBRI)")
     args = parser.parse_args()
 
-    print_header()
-    print(f"Initializing Quantum Engine for {args.ticker}...")
+    ticker = args.ticker.upper()
     
-    engine = QuantEngine(args.ticker)
-    
-    # 1. Fetch
-    print("Fetching 3 years of OHLCV data from Yahoo Finance...")
-    success, msg = engine.fetch_data()
-    if not success:
-        print(f"{Fore.RED}Error: {msg}{Style.RESET_ALL}")
-        sys.exit(1)
+    # Auto-append .JK for Indonesia Stock Exchange if missing
+    if not ticker.endswith(".JK"):
+        ticker += ".JK"
 
-    # 2. Analyze
-    print("Running Sklearn Linear Regression on OBV...")
-    print("Calculating Scipy Local Extrema for Support/Resistance...")
-    print("Grid Searching Strategy Parameters (Optimization Loop)...")
+    print(f"\nInitializing Quantitative Engine for {ticker}...")
+    print("Fetching 3 years of OHLCV data via yfinance...")
+    print("Running Grid Search Optimization (MA, RSI, Stoch)...")
+    print("Backtesting strategies with 1:3 R:R mandate...")
     
     try:
-        results = engine.optimize_and_analyze()
-        
-        # 3. Output
-        print_verdict_card(results)
-        print_trade_plan(results)
-        print_stats(results)
-        
+        engine = StrategyEngine(ticker)
+        result = engine.run_optimization()
     except Exception as e:
-        print(f"{Fore.RED}Analysis Failed: {str(e)}{Style.RESET_ALL}")
-        import traceback
-        traceback.print_exc()
+        print(f"\nERROR: Could not analyze {ticker}. {str(e)}")
+        print("Make sure the ticker is correct and available on Yahoo Finance.")
+        sys.exit(1)
+
+    # --- DASHBOARD OUTPUT ---
+
+    # 1. VERDICT CARD
+    print("\n" + "=" * 50)
+    print(f" STOCK: {ticker.replace('.JK', '')}   |   VERDICT: {result['verdict']}")
+    print("=" * 50)
+
+    # 2. TRADE PLAN
+    if result['verdict'] == "BUY":
+        plan = result['plan']
+        print_header("EXECUTION PLAN (OJK Compliant)")
+        print(f" ENTRY PRICE : {format_currency(plan['entry'])}")
+        print(f" STOP LOSS   : {format_currency(plan['sl'])} (Risk 1R)")
+        print_separator()
+        print(f" TARGET 1    : {format_currency(plan['tp1'])} (1R)")
+        print(f" TARGET 2    : {format_currency(plan['tp2'])} (2R)")
+        print(f" TARGET 3    : {format_currency(plan['tp3'])} (3R)")
+    
+    # 3. THE LOGIC
+    print_header("THE LOGIC (WHY?)")
+    print(f" {result['logic']}")
+    
+    # 4. SAFETY SCORE / STATS
+    print_header("SAFETY SCORE")
+    if result['stats']:
+        wr = result['stats']['win_rate']
+        count = result['stats']['trade_count']
+        rating = "HIGH" if wr > 75 else "MODERATE"
+        print(f" Strategy Used    : {result['stats']['strategy']}")
+        print(f" Historical WR    : {wr:.2f}% (over {count} trades)")
+        print(f" Confidence Lvl   : {rating}")
+    else:
+        print(" No strategy achieved the mandatory >65% Win Rate.")
+        print(" Recommendation: Do not trade. Wait for better conditions.")
+
+    # 5. TECHNICAL DEEP DIVE
+    dd = result['deep_dive']
+    print_header("TECHNICAL DEEP DIVE")
+    print(f" Current Price    : {format_currency(dd['price'])}")
+    print(f" Scipy Support    : {format_currency(dd['support_scipy'])}")
+    print(f" RSI (14)         : {dd['rsi']:.2f}")
+    print(f" Stoch K          : {dd['stoch_k']:.2f}")
+    print(f" MA Squeeze?      : {'YES' if dd['ma_squeeze'] else 'NO'}")
+    print_separator()
+    print(" [SMART MONEY ANALYSIS]")
+    print(f" OBV Slope        : {dd['obv_slope']:.4f}")
+    print(f" Smart Money Start: {dd['smart_money_start']}")
+    
+    # Interpretation of slope
+    if dd['obv_slope'] > 0:
+        print(" Status           : ACCUMULATION DETECTED")
+    else:
+        print(" Status           : DISTRIBUTION / NEUTRAL")
+    
+    print("\n" + "=" * 50 + "\n")
 
 if __name__ == "__main__":
     main()
