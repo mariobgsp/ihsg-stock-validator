@@ -63,7 +63,7 @@ python main.py BBRI --compressed
 * **DAY %:** Price change on that specific date.
 * **VOLUME:** Daily volume. `(G)` = Green Candle, `(R)` = Red Candle.
 
-## ⚠️ Disclaimer
+## Disclaimer
 
 This tool is for **educational and research purposes only**.
 * **Bandarmology Proxy:** This tool uses Volume and Price action to *simulate* Bandarmology. It does not have access to real Broker Summary (Broxsum) data (e.g., Code YP, PD, CC).
