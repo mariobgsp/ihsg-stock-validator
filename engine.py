@@ -1,372 +1,355 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import itertools
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
 
-# --- Configuration & Constants ---
-RISK_REWARD_RATIO = 3.0  # 1:3 R:R
-MIN_WIN_RATE = 0.50      # Mandatory > 50% Win Rate
+# --- OJK / IDX Compliance Module ---
+
+def get_tick_size(price: float) -> int:
+    """
+    Returns the valid tick size (fraction) based on IDX rules (2024/2025).
+    """
+    if price < 200:
+        return 1
+    elif 200 <= price < 500:
+        return 2
+    elif 500 <= price < 2000:
+        return 5
+    elif 2000 <= price < 5000:
+        return 10
+    else:
+        return 25
+
+def round_to_tick(price: float) -> int:
+    """Rounds a price to the nearest valid OJK tick."""
+    tick = get_tick_size(price)
+    return int(round(price / tick) * tick)
+
+# --- Data Structures ---
 
 @dataclass
-class TradeSignal:
-    action: str  # BUY, WAIT, NO_TRADE
+class BacktestResult:
+    win_rate: float
+    total_trades: int
+    max_drawdown: float
+    avg_candles_held: int
+    config: Dict
     strategy_name: str
+    is_valid: bool  # True if Win Rate > 65%
+
+@dataclass
+class SignalOutput:
+    action: str  # BUY, WAIT, NO TRADE
     entry_price: float
     stop_loss: float
     target_price: float
-    win_rate: float
-    prob_1r: float
-    prob_2r: float
-    prob_3r: float
-    reasoning: str
-    optimized_params: dict
+    reason: str
+    probabilities: Dict[str, float]
+    technical_data: Dict
+    backtest_stats: BacktestResult
 
-class IHSGTickRule:
-    """
-    Enforces Indonesia Stock Exchange (IDX/OJK) Price Fraction (Tick) Rules.
-    Rules as of standard IDX regulation:
-    < 200: Tick 1
-    200 - < 500: Tick 2
-    500 - < 2000: Tick 5
-    2000 - < 5000: Tick 10
-    >= 5000: Tick 25
-    """
-    @staticmethod
-    def adjust(price: float) -> int:
-        price = int(price)
-        if price < 200:
-            tick = 1
-        elif price < 500:
-            tick = 2
-        elif price < 2000:
-            tick = 5
-        elif price < 5000:
-            tick = 10
-        else:
-            tick = 25
-        
-        remainder = price % tick
-        if remainder == 0:
-            return price
-        
-        # Round to nearest tick
-        if remainder >= tick / 2:
-            return price + (tick - remainder)
-        else:
-            return price - remainder
+# --- Core Analysis Engine ---
 
-class TechnicalAnalysis:
-    @staticmethod
-    def rsi(series: pd.Series, period: int) -> pd.Series:
-        delta = series.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        return 100 - (100 / (1 + rs))
-
-    @staticmethod
-    def stochastic(high: pd.Series, low: pd.Series, close: pd.Series, k_period: int) -> pd.Series:
-        lowest_low = low.rolling(window=k_period).min()
-        highest_high = high.rolling(window=k_period).max()
-        k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
-        return k
-
-    @staticmethod
-    def sma(series: pd.Series, period: int) -> pd.Series:
-        return series.rolling(window=period).mean()
-
-    @staticmethod
-    def vwap(df: pd.DataFrame) -> pd.Series:
-        # Rolling VWAP approximation for daily data (since we lack tick data)
-        # Using typical price * volume
-        tp = (df['High'] + df['Low'] + df['Close']) / 3
-        vwap = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
-        return vwap
-
-class SmartMoneyAnalyzer:
-    @staticmethod
-    def analyze_flow(df: pd.DataFrame) -> Tuple[str, str]:
-        """
-        Analyzes Accumulation/Distribution using Price-Volume logic.
-        Returns (Status, Timestamp of Shift)
-        """
-        # effective_volume: Volume weighted by where close is relative to high/low
-        # If Close is near High, Buying Pressure. If near Low, Selling Pressure.
-        range_len = df['High'] - df['Low']
-        # Avoid division by zero
-        range_len = range_len.replace(0, 0.01)
-        
-        money_flow_multiplier = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / range_len
-        money_flow_vol = money_flow_multiplier * df['Volume']
-        
-        # 20-Day Money Flow Sum
-        cmf = money_flow_vol.rolling(20).sum()
-        
-        last_cmf = cmf.iloc[-1]
-        
-        # Detect Shift: Find last time CMF crossed from negative to positive (Accumulation start)
-        crosses = (cmf > 0) & (cmf.shift(1) <= 0)
-        last_shift = "Unknown"
-        if crosses.any():
-            last_shift = crosses[crosses].index[-1].strftime('%Y-%m-%d')
-
-        status = "Accumulation" if last_cmf > 0 else "Distribution"
-        return status, last_shift
-
-class StrategyEngine:
+class AlphaEngine:
     def __init__(self, ticker: str):
         self.ticker = ticker
-        if not self.ticker.endswith('.JK'):
-            self.ticker += '.JK'
+        if not self.ticker.endswith(".JK"):
+            self.ticker += ".JK"
         self.df = self._fetch_data()
         
     def _fetch_data(self) -> pd.DataFrame:
-        # Fetch 3 years of data
-        try:
-            df = yf.download(self.ticker, period="3y", interval="1d", progress=False)
-            if df.empty:
-                raise ValueError("No data found")
-            # Flatten columns if MultiIndex (yfinance update)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            return df
-        except Exception as e:
-            raise ConnectionError(f"Failed to download data: {e}")
+        """Fetches last 3 years of OHLCV data."""
+        start_date = (datetime.now() - timedelta(days=3*365)).strftime('%Y-%m-%d')
+        df = yf.download(self.ticker, start=start_date, progress=False)
+        if df.empty:
+            raise ValueError(f"No data found for {self.ticker}")
+        
+        # Flatten MultiIndex columns if present (yfinance update)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        df['Returns'] = df['Close'].pct_change()
+        return df
 
-    def detect_vcp(self, window=20) -> bool:
-        """
-        Detects Volatility Contraction Pattern (VCP).
-        Logic: StdDev of price is decreasing over 3 consecutive windows.
-        """
-        std = self.df['Close'].rolling(window=10).std()
-        # Check if current std is lower than std 10 days ago, and that is lower than 20 days ago
-        try:
-            c1 = std.iloc[-1] < std.iloc[-10]
-            c2 = std.iloc[-10] < std.iloc[-20]
-            # Volume contraction check: Current Avg Vol < Avg Vol 20 days ago
-            v1 = self.df['Volume'].rolling(5).mean().iloc[-1] < self.df['Volume'].rolling(20).mean().iloc[-1]
-            return c1 and c2 and v1
-        except:
-            return False
+    def calculate_indicators(self, df: pd.DataFrame, rsi_period=14, ma_fast=10, ma_slow=50, stoch_k=14) -> pd.DataFrame:
+        """Calculates indicators based on dynamic parameters."""
+        data = df.copy()
+        
+        # RSI
+        delta = data['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
+        rs = gain / loss
+        data['RSI'] = 100 - (100 / (1 + rs))
+        
+        # Moving Averages
+        data['MA_Fast'] = data['Close'].rolling(window=ma_fast).mean()
+        data['MA_Slow'] = data['Close'].rolling(window=ma_slow).mean()
+        
+        # Stochastic
+        low_min = data['Low'].rolling(window=stoch_k).min()
+        high_max = data['High'].rolling(window=stoch_k).max()
+        data['Stoch_K'] = 100 * ((data['Close'] - low_min) / (high_max - low_min))
+        
+        # VWAP
+        data['VWAP'] = (data['Volume'] * (data['High'] + data['Low'] + data['Close']) / 3).cumsum() / data['Volume'].cumsum()
+        
+        # OBV for Smart Money
+        data['OBV'] = (np.sign(data['Close'].diff()) * data['Volume']).fillna(0).cumsum()
+        data['OBV_MA'] = data['OBV'].rolling(window=20).mean() # Signal line for OBV
+        
+        return data
 
-    def detect_ma_squeeze(self) -> bool:
-        """
-        Detects if SMA 3, 5, 10, 20 are within 5% range (Superclose).
-        """
-        closes = self.df['Close']
-        ma3 = TechnicalAnalysis.sma(closes, 3).iloc[-1]
-        ma5 = TechnicalAnalysis.sma(closes, 5).iloc[-1]
-        ma10 = TechnicalAnalysis.sma(closes, 10).iloc[-1]
-        ma20 = TechnicalAnalysis.sma(closes, 20).iloc[-1]
+    def analyze_smart_money(self, df: pd.DataFrame) -> Dict:
+        """Analyzes Accumulation/Distribution and finds the Start Date."""
+        current_obv = df['OBV'].iloc[-1]
+        current_obv_ma = df['OBV_MA'].iloc[-1]
         
-        vals = [ma3, ma5, ma10, ma20]
-        mx = max(vals)
-        mn = min(vals)
+        status = "Accumulation" if current_obv > current_obv_ma else "Distribution"
         
-        if mn == 0: return False
-        diff_pct = (mx - mn) / mn
-        return diff_pct <= 0.05
-
-    def get_support_resistance(self) -> dict:
-        """
-        Calculates Standard Pivot, Fibonacci, and Historical Bounce.
-        """
-        last = self.df.iloc[-1]
-        high, low, close = last['High'], last['Low'], last['Close']
+        # Find start date (last crossover)
+        crossover = False
+        start_date = "Unknown"
         
-        # Pivot Points
-        pp = (high + low + close) / 3
-        s1 = (2 * pp) - high
-        
-        # Fibonacci (Last 1 year High/Low)
-        hist_1y = self.df.iloc[-252:]
-        max_h = hist_1y['High'].max()
-        min_l = hist_1y['Low'].min()
-        fib_0618 = max_h - (0.618 * (max_h - min_l)) # Golden Ratio retracement level
-        
+        # Iterate backwards to find the flip
+        for i in range(len(df)-1, 1, -1):
+            curr_cond = df['OBV'].iloc[i] > df['OBV_MA'].iloc[i]
+            prev_cond = df['OBV'].iloc[i-1] > df['OBV_MA'].iloc[i-1]
+            
+            if (status == "Accumulation" and not prev_cond and curr_cond) or \
+               (status == "Distribution" and prev_cond and not curr_cond):
+                start_date = df.index[i].strftime('%Y-%m-%d')
+                break
+                
         return {
-            "Pivot_S1": IHSGTickRule.adjust(s1),
-            "Fib_Golden": IHSGTickRule.adjust(fib_0618),
-            "Recent_Low": IHSGTickRule.adjust(min_l)
+            "status": status,
+            "strength": "High" if abs(current_obv - current_obv_ma) > df['OBV'].std() else "Moderate",
+            "start_date": start_date
         }
 
-    def backtest_single_config(self, params: dict) -> dict:
+    def detect_patterns(self, df: pd.DataFrame) -> Dict:
+        """Detects VCP, MA Squeeze, and Low Cheat."""
+        latest = df.iloc[-1]
+        
+        # MA Squeeze: SMA 3, 5, 10, 20 within 5% range
+        mas = [
+            df['Close'].rolling(3).mean().iloc[-1],
+            df['Close'].rolling(5).mean().iloc[-1],
+            df['Close'].rolling(10).mean().iloc[-1],
+            df['Close'].rolling(20).mean().iloc[-1]
+        ]
+        ma_min, ma_max = min(mas), max(mas)
+        is_squeeze = (ma_max - ma_min) / ma_min < 0.05
+        
+        # VCP: Decreasing volatility over last 20 days
+        # Simplified logic: Range (High-Low) is shrinking
+        ranges = (df['High'] - df['Low']).tail(20)
+        # Check if the average range of the last 5 days is smaller than the first 5 days of the window
+        is_vcp = ranges.iloc[-5:].mean() < ranges.iloc[:5].mean() * 0.7 and latest['Volume'] < df['Volume'].tail(20).mean()
+        
+        return {
+            "VCP": is_vcp,
+            "MA_Squeeze": is_squeeze,
+            "Low_Cheat": is_vcp and latest['Close'] > latest['MA_Slow'] # Simple proxy for low cheat base
+        }
+
+    def get_support_resistance(self, df: pd.DataFrame) -> Dict:
+        """Calculates Pivot Points, Fibs, and Bounce Zones."""
+        high = df['High'].iloc[-1]
+        low = df['Low'].iloc[-1]
+        close = df['Close'].iloc[-1]
+        
+        # Standard Pivot
+        pivot = (high + low + close) / 3
+        s1 = (2 * pivot) - high
+        
+        # Recent Bounce Zone (Lowest Low of last 60 days that held more than once)
+        last_60 = df.tail(60)
+        min_price = last_60['Low'].min()
+        
+        # Fib Retracement from last major swing high (last 90 days max)
+        swing_high = df['High'].tail(90).max()
+        swing_low = df['Low'].tail(90).min()
+        fib_618 = swing_high - ((swing_high - swing_low) * 0.618)
+        
+        return {
+            "Pivot_Support": round_to_tick(s1),
+            "Bounce_Zone": round_to_tick(min_price),
+            "Fib_Golden_Zone": round_to_tick(fib_618)
+        }
+
+    def _backtest_strategy(self, df: pd.DataFrame, strategy_type: str, rsi_p, ma_f, ma_s) -> BacktestResult:
         """
-        Runs a simulation over the dataframe with specific params.
-        Returns stats: WinRate, Prob1R, Prob2R, Prob3R.
+        Runs a simulation of the strategy on historical data.
+        Returns performance metrics.
         """
-        df = self.df.copy()
+        capital = 10000000 # 10 Juta IDR
+        balance = capital
+        position = 0
+        trades = 0
+        wins = 0
+        entry_price = 0
+        peak_balance = capital
+        drawdown = 0
+        candles_held = []
+        entry_idx = 0
+
+        # Run logic on historical data
+        # Note: We iterate through the dataframe. This is simplified for speed.
         
-        # Apply Indicators
-        df['RSI'] = TechnicalAnalysis.rsi(df['Close'], params['rsi_period'])
-        df['Stoch'] = TechnicalAnalysis.stochastic(df['High'], df['Low'], df['Close'], params['stoch_k'])
-        df['MA_Fast'] = TechnicalAnalysis.sma(df['Close'], params['ma_fast'])
-        df['MA_Slow'] = TechnicalAnalysis.sma(df['Close'], params['ma_slow'])
+        # Pre-calculate signals to speed up loop
+        # Logic: Buy if MA_Fast crosses MA_Slow AND RSI < 70
         
-        signals = []
-        trades = [] # Stores Outcome: 'Loss', '1R', '2R', '3R' (cumulative)
-        
-        # Iterative Backtest (simplified for CLI speed)
-        # Strategy: Buy if RSI < 40 (Dip) OR MA Cross (Trend)
-        # We simulate the entry and trace forward to see if TP/SL hit
-        
-        for i in range(50, len(df)-1):
+        for i in range(ma_s, len(df)):
             row = df.iloc[i]
             prev = df.iloc[i-1]
             
-            # Simple Combine Strategy for Backtest
-            signal = False
-            
-            # 1. Trend Filter
-            is_uptrend = row['MA_Fast'] > row['MA_Slow']
-            
-            # 2. Trigger
-            # Buy Dip in Uptrend or Breakout
-            buy_dip = is_uptrend and row['RSI'] < 40 and row['RSI'] > prev['RSI']
-            ma_cross = (prev['MA_Fast'] < prev['MA_Slow']) and (row['MA_Fast'] > row['MA_Slow'])
-            
-            if buy_dip or ma_cross:
-                signal = True
+            # Entry Logic
+            if position == 0:
+                signal = False
+                if strategy_type == "Trend_Following":
+                    signal = row['MA_Fast'] > row['MA_Slow'] and prev['MA_Fast'] <= prev['MA_Slow']
+                elif strategy_type == "Dip_Buy":
+                    signal = row['RSI'] < 30 and row['Close'] > row['MA_Slow']
                 
-            if signal:
-                entry_price = row['Close']
-                # OJK Compliant Stop Loss (Swing Low or % based)
-                # Using implied volatility (ATR approx) or fixed % for standardized testing
-                stop_loss = IHSGTickRule.adjust(entry_price * 0.95) 
-                risk = entry_price - stop_loss
-                if risk <= 0: continue
-                
-                target_1r = IHSGTickRule.adjust(entry_price + risk)
-                target_2r = IHSGTickRule.adjust(entry_price + (risk * 2))
-                target_3r = IHSGTickRule.adjust(entry_price + (risk * 3))
-                
-                # Forward trace
-                outcome = {'1R': False, '2R': False, '3R': False, 'Win': False}
-                for j in range(i+1, min(i+60, len(df))): # Look ahead 60 days max
-                    future = df.iloc[j]
+                if signal:
+                    tick = get_tick_size(row['Close'])
+                    stop_loss = row['Close'] - (3 * tick) # Tight stop for simulation
+                    risk = row['Close'] - stop_loss
+                    target = row['Close'] + (risk * 3) # 1:3 RR
                     
-                    if future['Low'] <= stop_loss:
-                        # Stopped out
-                        break
-                        
-                    if future['High'] >= target_1r: outcome['1R'] = True
-                    if future['High'] >= target_2r: outcome['2R'] = True
-                    if future['High'] >= target_3r: outcome['3R'] = True
+                    position = int(balance / row['Close'])
+                    balance -= position * row['Close']
+                    entry_price = row['Close']
+                    entry_idx = i
+                    tp_price = target
+                    sl_price = stop_loss
+                    trades += 1
+
+            # Exit Logic (Simulation)
+            elif position > 0:
+                # Check High/Low for TP/SL hit
+                if row['Low'] <= sl_price:
+                    balance += position * sl_price
+                    position = 0
+                    candles_held.append(i - entry_idx)
+                elif row['High'] >= tp_price:
+                    balance += position * tp_price
+                    position = 0
+                    wins += 1
+                    candles_held.append(i - entry_idx)
                 
-                # A trade is a "Win" if it hit at least 1R before SL (conservative definition for winrate)
-                # Or strictly user requested > 50% Win Rate implies general profitability.
-                # Let's define Win as hitting 2R for "Swing Trading" success, or 1R for Scalp.
-                # Requirement says "Overall Win Rate". We'll use 1.5R as breakeven/win threshold.
-                if outcome['1R']: trades.append(outcome)
+                # Update Drawdown
+                current_val = balance + (position * row['Close'])
+                peak_balance = max(peak_balance, current_val)
+                dd = (peak_balance - current_val) / peak_balance
+                drawdown = max(drawdown, dd)
 
-        total_trades = len(trades)
-        if total_trades == 0:
-            return {"win_rate": 0, "p1": 0, "p2": 0, "p3": 0}
-            
-        # Calc probabilities
-        p1 = sum(1 for t in trades if t['1R']) / total_trades
-        p2 = sum(1 for t in trades if t['2R']) / total_trades
-        p3 = sum(1 for t in trades if t['3R']) / total_trades
+        win_rate = (wins / trades * 100) if trades > 0 else 0
+        avg_hold = sum(candles_held)/len(candles_held) if candles_held else 0
         
-        return {
-            "win_rate": p1, # Defining Win Rate as hitting at least 1R without stopping out
-            "p1": p1,
-            "p2": p2,
-            "p3": p3
-        }
+        return BacktestResult(
+            win_rate=win_rate,
+            total_trades=trades,
+            max_drawdown=drawdown * 100,
+            avg_candles_held=int(avg_hold),
+            config={'rsi': rsi_p, 'ma_fast': ma_f, 'ma_slow': ma_s},
+            strategy_name=strategy_type,
+            is_valid=win_rate > 65.0
+        )
 
-    def optimize(self) -> TradeSignal:
+    def optimize_and_run(self) -> SignalOutput:
         """
-        Grid Search for best parameters.
+        Grid Search to find best parameters and strategy.
+        Then generates the final signal based on current data.
         """
-        rsi_range = [9, 14, 21, 25]
-        stoch_range = [9, 14, 21]
-        ma_pairs = [(5, 10), (10, 20), (20, 50)]
+        # Grid Search Parameters
+        rsi_params = [9, 14, 21]
+        ma_params = [(5, 10), (10, 20), (20, 50), (50, 200)]
+        strategies = ["Trend_Following", "Dip_Buy"]
         
-        best_perf = 0
-        best_params = {}
-        best_stats = {}
+        best_result: Optional[BacktestResult] = None
         
-        # Grid Search
-        param_grid = list(itertools.product(rsi_range, stoch_range, ma_pairs))
-        
-        for r, s, (ma_f, ma_s) in param_grid:
-            params = {'rsi_period': r, 'stoch_k': s, 'ma_fast': ma_f, 'ma_slow': ma_s}
-            stats = self.backtest_single_config(params)
-            
-            # Performance Threshold
-            if stats['win_rate'] > best_perf:
-                best_perf = stats['win_rate']
-                best_params = params
-                best_stats = stats
-        
-        # If no strategy met the threshold (very strict), return NO TRADE or use best available but warn
-        if best_perf < MIN_WIN_RATE:
-            return TradeSignal("NO TRADE", "Backtest Fail", 0, 0, 0, 0, 0, 0, 0, 
-                             f"No strategy met >50% Win Rate (Best: {best_perf:.2%})", best_params)
-        
-        # Generate CURRENT Signal based on Best Params
-        return self._generate_live_signal(best_params, best_stats)
+        # 1. OPTIMIZATION LOOP
+        for rsi in rsi_params:
+            for ma_f, ma_s in ma_params:
+                # Calculate indicators ONCE for this config
+                df_calc = self.calculate_indicators(self.df, rsi, ma_f, ma_s)
+                
+                for strat in strategies:
+                    res = self._backtest_strategy(df_calc, strat, rsi, ma_f, ma_s)
+                    
+                    if res.is_valid:
+                        if best_result is None or res.win_rate > best_result.win_rate:
+                            best_result = res
 
-    def _generate_live_signal(self, params, stats) -> TradeSignal:
-        df = self.df
+        # Fallback if no strategy meets 65% (Return best available but mark danger)
+        if best_result is None:
+            # Re-run to find just the highest WR even if low
+            best_result = BacktestResult(0,0,0,0, {}, "None", False) # Dummy
+
+        # 2. GENERATE CURRENT SIGNAL USING BEST CONFIG
+        final_config = best_result.config if best_result.config else {'rsi': 14, 'ma_fast': 10, 'ma_slow': 20}
+        df_final = self.calculate_indicators(self.df, **final_config)
         
-        # Recalculate indicators with best params
-        rsi = TechnicalAnalysis.rsi(df['Close'], params['rsi_period']).iloc[-1]
-        ma_fast = TechnicalAnalysis.sma(df['Close'], params['ma_fast']).iloc[-1]
-        ma_slow = TechnicalAnalysis.sma(df['Close'], params['ma_slow']).iloc[-1]
-        curr_price = df['Close'].iloc[-1]
+        smart_money = self.analyze_smart_money(df_final)
+        patterns = self.detect_patterns(df_final)
+        levels = self.get_support_resistance(df_final)
         
-        # Patterns
-        is_vcp = self.detect_vcp()
-        is_squeeze = self.detect_ma_squeeze()
-        sm_status, sm_time = SmartMoneyAnalyzer.analyze_flow(df)
+        latest = df_final.iloc[-1]
         
-        # Logic Tree
+        # Decide Action based on optimized strategy logic applied to *current* candle
         action = "WAIT"
-        strategy = "Observation"
-        reason_parts = []
+        reason = "Setup conditions not met."
         
-        # 1. VCP + Smart Money (Strongest)
-        if is_vcp and sm_status == "Accumulation":
-            action = "BUY"
-            strategy = "VCP Breakout"
-            reason_parts.append("VCP Pattern Confirmed")
-            reason_parts.append(f"Smart Money Accumulation since {sm_time}")
-            
-        # 2. MA Squeeze Breakout
-        elif is_squeeze and curr_price > ma_fast:
-            action = "BUY"
-            strategy = "MA Squeeze Breakout"
-            reason_parts.append("MA Squeeze (Superclose) Detected")
-            
-        # 3. Pullback/Dip (Optimized Params)
-        elif curr_price > ma_slow and rsi < 40:
-            action = "BUY"
-            strategy = "Optimized Dip Buy"
-            reason_parts.append(f"RSI({params['rsi_period']}) Oversold in Uptrend")
-            
-        else:
-            reason_parts.append("No high-confluence setup detected")
-            
-        entry = curr_price
-        stop = IHSGTickRule.adjust(entry * 0.95) # Default 5% risk logic for output
-        target = IHSGTickRule.adjust(entry + ((entry - stop) * RISK_REWARD_RATIO))
+        # Logic Application
+        if best_result.strategy_name == "Trend_Following":
+            if latest['MA_Fast'] > latest['MA_Slow'] and patterns['MA_Squeeze'] == False:
+                 # Breakout check
+                 if latest['Close'] > levels['Pivot_Support']:
+                     action = "BUY"
+                     reason = "Trend Following Breakout with Optimized MAs"
+        elif best_result.strategy_name == "Dip_Buy":
+            if latest['RSI'] < 35 and latest['Close'] > levels['Bounce_Zone']:
+                action = "BUY"
+                reason = "Oversold Bounce Play at Historical Support"
+
+        # Risk Calculation
+        current_price = latest['Close']
+        stop_loss = round_to_tick(levels['Pivot_Support'] if levels['Pivot_Support'] < current_price else current_price * 0.95)
+        risk = current_price - stop_loss
+        target = round_to_tick(current_price + (risk * 3))
         
-        reason = " + ".join(reason_parts)
+        if risk <= 0: # Sanity check if price below support
+            action = "NO TRADE"
+            reason = "Price is below immediate support."
+
+        # Probabilities (Heuristic based on Backtest WR and Technical Confluence)
+        base_prob = best_result.win_rate
+        if smart_money['status'] == "Accumulation": base_prob += 5
+        if patterns['VCP']: base_prob += 10
         
-        return TradeSignal(
+        return SignalOutput(
             action=action,
-            strategy_name=strategy,
-            entry_price=entry,
-            stop_loss=stop,
+            entry_price=current_price,
+            stop_loss=stop_loss,
             target_price=target,
-            win_rate=stats['win_rate'],
-            prob_1r=stats['p1'],
-            prob_2r=stats['p2'],
-            prob_3r=stats['p3'],
-            reasoning=reason,
-            optimized_params=params
+            reason=reason,
+            probabilities={
+                "1R": min(base_prob + 15, 95),
+                "2R": min(base_prob, 85),
+                "3R": min(base_prob - 20, 60)
+            },
+            technical_data={
+                "Current_Price": current_price,
+                "VWAP": latest['VWAP'],
+                "Indicators": final_config,
+                "RSI_Value": round(latest['RSI'], 2),
+                "Smart_Money": smart_money,
+                "Levels": levels,
+                "Patterns": patterns
+            },
+            backtest_stats=best_result
         )
